@@ -1,0 +1,6 @@
+{
+  "name": "PrismGrid 3D — Isometric Glass Cube Puzzle",
+  "description": "An interactive 3D spatial puzzle game built with React Three Fiber featuring a 3x3x3 floating glass cube cluster, isometric orthographic projection, OrbitControls, and precision raycast visibility toggling.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
