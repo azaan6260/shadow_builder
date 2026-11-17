@@ -5,7 +5,15 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import confetti from 'canvas-confetti';
-import { ArrowRight, Award, CheckCircle2, Eye, RotateCcw, Undo2 } from 'lucide-react';
+import {
+  ArrowRight,
+  Award,
+  CheckCircle2,
+  Eye,
+  Rotate3d,
+  RotateCcw,
+  Undo2,
+} from 'lucide-react';
 import {
   CameraPresetId,
   GlassThemeId,
@@ -25,6 +33,7 @@ export default function App() {
   const pieces = usePuzzleStore((s) => s.pieces);
   const blocks = usePuzzleStore((s) => s.blocks);
   const windowCoordinates = usePuzzleStore((s) => s.windowCoordinates);
+  const allowedFloorSet = usePuzzleStore((s) => s.allowedFloorSet);
   const targetShadow = usePuzzleStore((s) => s.targetShadow);
   const targetWallShape = usePuzzleStore((s) => s.targetWallShape);
   const targetFloorShape = usePuzzleStore((s) => s.targetFloorShape);
@@ -37,6 +46,7 @@ export default function App() {
   const lastCraneTransfer = usePuzzleStore((s) => s.lastCraneTransfer);
   const selectPiece = usePuzzleStore((s) => s.selectPiece);
   const cycleSelectedPiece = usePuzzleStore((s) => s.cycleSelectedPiece);
+  const rotateSelectedPiece = usePuzzleStore((s) => s.rotateSelectedPiece);
   const moveSelectedWithGravity = usePuzzleStore((s) => s.moveSelectedWithGravity);
   const nudgePiece = usePuzzleStore((s) => s.nudgePiece);
   const movePieceTo = usePuzzleStore((s) => s.movePieceTo);
@@ -56,35 +66,33 @@ export default function App() {
     [activeLevelId]
   );
 
-  // Evaluate Right to Light balcony status, staging area placement, and 60° sun shadow projections
+  const activeSelectedId = selectedBlockId ?? selectedPieceId;
+
+  // Evaluate Right to Light balcony status, limited foundation placement, and 40° sun shadow projections
   const winStatus = useMemo(
-    () => checkWinCondition(pieces, windowCoordinates),
-    [pieces, windowCoordinates]
+    () => checkWinCondition(pieces, windowCoordinates, allowedFloorSet),
+    [pieces, windowCoordinates, allowedFloorSet]
   );
 
-  // Phase 16: The "Right to Light" Analytical Win Condition (60° Single Sun + Balcony Residents)
-  // 1. Traces the 60-degree Sun ray from each Neighboring Building balcony through the Central Zone blocks.
-  // 2. Checks if any balcony resident is cast into shadow (making them angry).
-  // 3. Triggers the Win State when:
-  //    (a) All blocks from the staging area have been stacked in the central building zone, AND
-  //    (b) Zero balconies on the neighboring buildings are shaded (0 angry residents).
+  // Phase 16: The "Right to Light" Analytical Win Condition (40° Single Sun + Balcony Residents + Limited Foundation Pads)
   useEffect(() => {
     const visibleBlocks = blocks.filter((block) => block.visible === true);
     const centralZoneBlocks = visibleBlocks.filter(
       (block) => block.z >= -2 && block.z <= 2
     );
 
-    // 1. Check if the 60° Sun shadow from any central zone block hits any balcony resident
+    // 1. Check if the 40° Sun shadow from any central zone block hits any balcony resident
     const shadedBalconies = windowCoordinates.filter(([wx, wy]) =>
       isBalconyShadedByBlocks(wx, wy, centralZoneBlocks, LIGHT_POSITION)
     );
     const zeroBalconiesShaded = shadedBalconies.length === 0;
 
-    // 2. Staging Area Check: Have all modular blocks been moved into the central building zone?
+    // 2. Staging Area & Limited Buildable Pads Check: Have all modular blocks been placed on valid foundation pads?
     const allBlocksStackedInCentralZone =
-      pieces.length > 0 && pieces.every((piece) => isPieceInCentralZone(piece));
+      pieces.length > 0 &&
+      pieces.every((piece) => isPieceInCentralZone(piece, allowedFloorSet));
 
-    // Also compute 60° angled floor projection
+    // Also compute 40° angled floor projection
     projectAngledShadow(centralZoneBlocks, LIGHT_POSITION);
 
     const matchedRightToLightWin =
@@ -95,6 +103,7 @@ export default function App() {
     blocks,
     pieces,
     windowCoordinates,
+    allowedFloorSet,
     targetShadow,
     targetWallShape,
     targetFloorShape,
@@ -148,7 +157,17 @@ export default function App() {
     [selectedPieceId, pieces, nudgePiece]
   );
 
-  // Keyboard shortcuts remain available for desktop users without any visible control overlay
+  const handleRotateAxis = useCallback(
+    (axis: 'x' | 'y' | 'z') => {
+      if (!activeSelectedId && pieces.length > 0) {
+        selectPiece(pieces[0].id);
+      }
+      rotateSelectedPiece(axis);
+    },
+    [activeSelectedId, pieces, selectPiece, rotateSelectedPiece]
+  );
+
+  // Keyboard shortcuts for desktop users (including X, Y, C / 1, 2, 3 for 3-axis rotation)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
@@ -159,7 +178,16 @@ export default function App() {
         return;
       }
 
-      if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') {
+      if (e.key === 'x' || e.key === 'X' || e.key === '1') {
+        e.preventDefault();
+        handleRotateAxis('x');
+      } else if (e.key === 'y' || e.key === 'Y' || e.key === '2') {
+        e.preventDefault();
+        handleRotateAxis('y');
+      } else if (e.key === 'c' || e.key === 'C' || e.key === '3') {
+        e.preventDefault();
+        handleRotateAxis('z');
+      } else if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') {
         e.preventDefault();
         handleNudgeSelected([-1, 0, 0]);
       } else if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') {
@@ -185,14 +213,14 @@ export default function App() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [cycleSelectedPiece, handleNudgeSelected, undo, resetLevel]);
+  }, [cycleSelectedPiece, handleRotateAxis, handleNudgeSelected, undo, resetLevel]);
 
   const sunlitWindows = windowCoordinates.length - winStatus.blockedWindows.length;
 
   return (
-    <div className="relative w-full h-full overflow-hidden bg-[#e2e8f0] select-none">
-      {/* Slim, Mobile & Screen-Rotation Friendly Top Bar — Zero Floating Control Panels Over the 3D Canvas */}
-      <header className="fixed top-0 left-0 right-0 z-20 flex items-center justify-between gap-2 sm:gap-6 px-3 sm:px-6 h-11 sm:h-12 bg-[#090d16]/95 border-b border-slate-800/80 pointer-events-auto">
+    <div className="relative w-full h-full overflow-hidden bg-[#bae6fd] select-none">
+      {/* Slim, Mobile & Screen-Rotation Friendly Top Bar — Includes 3-Axis Block Rotation (X, Y, Z) */}
+      <header className="fixed top-0 left-0 right-0 z-20 flex items-center justify-between gap-1.5 sm:gap-4 px-2.5 sm:px-5 h-11 sm:h-12 bg-[#090d16]/95 border-b border-slate-800/80 pointer-events-auto">
         {/* Zone 1: Wordmark */}
         <a
           href="#top"
@@ -200,13 +228,13 @@ export default function App() {
             e.preventDefault();
             handleSelectLevel(PUZZLE_LEVELS[0].id);
           }}
-          className="font-display text-sm sm:text-base font-bold tracking-tight text-white whitespace-nowrap shrink-0"
+          className="font-display text-xs sm:text-base font-bold tracking-tight text-white whitespace-nowrap shrink-0"
         >
           PrismGrid 3D
         </a>
 
         {/* Zone 2: Responsive Level Links + Quiet Inline Right-to-Light Telemetry */}
-        <nav className="flex items-center gap-2.5 sm:gap-5 text-xs sm:text-sm font-medium text-slate-400 min-w-0 overflow-x-auto">
+        <nav className="flex items-center gap-2 sm:gap-4 text-xs sm:text-sm font-medium text-slate-400 min-w-0 overflow-x-auto">
           {PUZZLE_LEVELS.map((lvl) => {
             const isCurrent = activeLevelId === lvl.id;
             return (
@@ -226,11 +254,11 @@ export default function App() {
             );
           })}
 
-          <span aria-hidden="true" className="text-slate-700 hidden xs:inline">
+          <span aria-hidden="true" className="text-slate-700 hidden md:inline">
             ·
           </span>
 
-          <div className="hidden xs:flex items-center gap-1.5 font-mono-tabular text-[11px] sm:text-xs whitespace-nowrap shrink-0">
+          <div className="hidden md:flex items-center gap-1.5 font-mono-tabular text-[11px] sm:text-xs whitespace-nowrap shrink-0">
             <span className="text-slate-300">
               {winStatus.placedPiecesCount}/{winStatus.totalPieces} Stacked
             </span>
@@ -251,14 +279,40 @@ export default function App() {
           </div>
         </nav>
 
-        {/* Zone 3: Compact Undo & Reset Actions */}
-        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+        {/* Zone 3: 3-Axis Block Rotation Controls (Rot X, Rot Y, Rot Z) + Undo & Reset */}
+        <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+          {/* 3-Axis Block Rotation Group */}
+          <div
+            className="flex items-center gap-0.5 sm:gap-1 px-1 py-0.5 rounded-lg bg-slate-900/90 border border-slate-700/80"
+            title="Select a block and rotate it 90° around the X, Y, or Z axis"
+          >
+            <Rotate3d className="w-3.5 h-3.5 text-sky-400 hidden sm:inline ml-1 mr-0.5" />
+            {(['x', 'y', 'z'] as const).map((axis) => (
+              <button
+                key={`rotate-${axis}`}
+                type="button"
+                data-testid={`rotate-${axis}-button`}
+                onClick={() => handleRotateAxis(axis)}
+                disabled={!activeSelectedId}
+                className={`px-1.5 sm:px-2 py-1 rounded text-[10px] sm:text-xs font-mono-tabular font-semibold transition-colors whitespace-nowrap ${
+                  activeSelectedId
+                    ? 'bg-sky-500/20 hover:bg-sky-500/35 text-sky-300 border border-sky-400/40 cursor-pointer'
+                    : 'bg-slate-800/40 text-slate-500 border border-transparent cursor-not-allowed'
+                }`}
+                title={`Rotate selected block 90° around ${axis.toUpperCase()}-axis`}
+              >
+                <span className="sm:hidden">{axis.toUpperCase()}</span>
+                <span className="hidden sm:inline">Rot {axis.toUpperCase()}</span>
+              </button>
+            ))}
+          </div>
+
           <button
             type="button"
             data-testid="undo-button"
             onClick={undo}
             disabled={history.length === 0}
-            className={`flex items-center gap-1 px-2.5 sm:px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors whitespace-nowrap shrink-0 ${
+            className={`flex items-center gap-1 px-2 sm:px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors whitespace-nowrap shrink-0 ${
               history.length > 0
                 ? 'bg-slate-800 hover:bg-slate-700 text-sky-300 border-slate-700 cursor-pointer'
                 : 'bg-slate-900/50 text-slate-600 border-slate-800/60 cursor-not-allowed'
@@ -266,17 +320,17 @@ export default function App() {
             title="Undo last step (Shortcut: Z)"
           >
             <Undo2 className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Undo</span>
+            <span className="hidden lg:inline">Undo</span>
           </button>
 
           <button
             type="button"
             onClick={resetLevel}
-            className="flex items-center gap-1 px-2.5 sm:px-3.5 py-1.5 text-xs font-semibold text-slate-950 bg-sky-400 rounded-lg hover:bg-sky-300 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+            className="flex items-center gap-1 px-2 sm:px-3 py-1.5 text-xs font-semibold text-slate-950 bg-sky-400 rounded-lg hover:bg-sky-300 transition-colors cursor-pointer whitespace-nowrap shrink-0"
             title="Reset Level (Shortcut: R)"
           >
             <RotateCcw className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Reset</span>
+            <span className="hidden lg:inline">Reset</span>
           </button>
         </div>
       </header>
@@ -305,7 +359,7 @@ export default function App() {
               Level Cleared
             </h2>
             <p className="mt-1 text-xs sm:text-sm text-slate-300">
-              {activeLevel.title} — All modular skyscraper units from the staging area have been stacked by the Tower Crane and every neighboring balcony resident is enjoying the 60° sun!
+              {activeLevel.title} — All modular skyscraper units have been oriented and stacked onto the limited concrete foundation pads without shading a single neighbor balcony!
             </p>
 
             {/* Right to Light Summary Metrics */}
@@ -354,18 +408,19 @@ export default function App() {
         </div>
       )}
 
-      {/* Unobstructed Full-Viewport 3D Urban Cityscape with Gantry Crane & Neighboring Building Windows */}
+      {/* Unobstructed Full-Viewport 3D Urban Cityscape with Tower Crane, Gardens, Roads, Cars, Clouds & Birds */}
       <main className="w-full h-full pt-11 sm:pt-12">
         <CubeClusterScene
           pieces={pieces}
           blocks={blocks}
-          selectedPieceId={selectedBlockId ?? selectedPieceId}
+          selectedPieceId={activeSelectedId}
           windowCoordinates={windowCoordinates}
+          allowedFloorSet={allowedFloorSet}
           blockedWindowSet={winStatus.blockedWindowSet}
           wallStencils={winStatus.wallStencils}
           floorStencils={winStatus.floorStencils}
           lastCraneTransfer={lastCraneTransfer}
-          spacing={1.06}
+          spacing={0.82}
           themeId={themeId}
           dragPlaneMode={dragPlaneMode}
           activeCameraPreset={activeCameraPreset}
@@ -379,3 +434,4 @@ export default function App() {
     </div>
   );
 }
+

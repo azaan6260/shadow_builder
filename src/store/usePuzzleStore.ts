@@ -4,7 +4,10 @@ import {
   BlockState,
   GRID_MAX,
   GRID_MIN,
+  GRID_Z_MAX,
+  GRID_Z_MIN,
   PUZZLE_LEVELS,
+  STAGING_Z_MIN,
   WallPiece,
   calculateGravityDrop,
   deriveBlocksFromPieces,
@@ -12,6 +15,7 @@ import {
   getTargetShadow,
   getTargetWallShape,
   isValidPiecePosition,
+  rotatePieceByAxis,
   settlePiecesWithGravity,
 } from '../types/puzzle';
 import { soundFX } from '../utils/sound';
@@ -20,6 +24,9 @@ function instantiateLevelPieces(levelId: string): WallPiece[] {
   const level = PUZZLE_LEVELS.find((l) => l.id === levelId) ?? PUZZLE_LEVELS[0];
   const raw = level.pieces.map((p) => ({
     ...p,
+    dims: [...p.dims] as [number, number, number],
+    baseDims: [...(p.baseDims ?? p.dims)] as [number, number, number],
+    rotation: [...(p.rotation ?? [0, 0, 0])] as [number, number, number],
     position: [...p.initialPosition] as [number, number, number],
   }));
   return settlePiecesWithGravity(raw);
@@ -28,6 +35,15 @@ function instantiateLevelPieces(levelId: string): WallPiece[] {
 function getLevelWindowCoordinates(levelId: string): Array<[number, number]> {
   const level = PUZZLE_LEVELS.find((l) => l.id === levelId) ?? PUZZLE_LEVELS[0];
   return level.windowCoordinates.map(([wx, wy]) => [wx, wy]);
+}
+
+function getLevelAllowedFloorCells(levelId: string): Array<[number, number]> {
+  const level = PUZZLE_LEVELS.find((l) => l.id === levelId) ?? PUZZLE_LEVELS[0];
+  return level.allowedFloorCells.map(([fx, fz]) => [fx, fz]);
+}
+
+function buildAllowedFloorSet(cells: Array<[number, number]>): Set<string> {
+  return new Set(cells.map(([fx, fz]) => `${fx},${fz}`));
 }
 
 export interface HistorySnapshot {
@@ -50,9 +66,13 @@ interface PuzzleStoreState {
   blocks: BlockState[];
   /** Phase 15 & 16: Window coordinates [[x, y], ...] on the Neighboring Buildings */
   windowCoordinates: Array<[number, number]>;
-  /** Phase 17: Most recent crane transfer operation for sequencing the 3D Gantry Crane */
+  /** Limited buildable (x, z) floor coordinates inside the Central Building Zone */
+  allowedFloorCells: Array<[number, number]>;
+  /** Set of "x,z" strings for buildable floor cells inside the Central Building Zone */
+  allowedFloorSet: Set<string>;
+  /** Phase 17: Most recent crane transfer operation for sequencing the 3D Tower Crane */
   lastCraneTransfer: CraneTransferOp | null;
-  /** Phase 12: Set of projected 2D angled shadow floor coordinates ("shadowX,shadowZ") under light [10, 10, 5] */
+  /** Phase 12: Set of projected 2D angled shadow floor coordinates ("shadowX,shadowZ") */
   targetShadow: Set<string>;
   /** 2D array of [x, y] target coordinates on the back wall */
   targetWallShape: Array<[number, number]>;
@@ -75,9 +95,15 @@ interface PuzzleStoreState {
   cycleSelectedPiece: () => void;
 
   /**
+   * Rotates the currently selected block 90 degrees around the world X, Y, or Z axis,
+   * updating its 3D Euler orientation and grid dimensions `[w, h, d]`.
+   */
+  rotateSelectedPiece: (axis: 'x' | 'y' | 'z') => boolean;
+
+  /**
    * Phase 11 & 17: Moves the currently selected block to `(targetX, targetZ)` using
    * `calculateGravityDrop(targetX, targetZ, currentBlocks)` to find `calculatedY = highestY + 1` (or 0),
-   * triggers the Gantry Crane animation sequence, and deselects it.
+   * triggers the Tower Crane animation sequence, and deselects it.
    */
   moveSelectedWithGravity: (targetX: number, targetZ: number) => boolean;
 
@@ -113,12 +139,16 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
   const defaultLevelId = PUZZLE_LEVELS[0].id;
   const initialPieces = instantiateLevelPieces(defaultLevelId);
   const initialBlocks = deriveBlocksFromPieces(initialPieces);
+  const initialAllowedCells = getLevelAllowedFloorCells(defaultLevelId);
+  const initialAllowedSet = buildAllowedFloorSet(initialAllowedCells);
 
   return {
     activeLevelId: defaultLevelId,
     pieces: initialPieces,
     blocks: initialBlocks,
     windowCoordinates: getLevelWindowCoordinates(defaultLevelId),
+    allowedFloorCells: initialAllowedCells,
+    allowedFloorSet: initialAllowedSet,
     lastCraneTransfer: null,
     targetShadow: getTargetShadow(initialPieces).targetShadow,
     targetWallShape: getTargetWallShape(initialPieces),
@@ -151,8 +181,132 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
       soundFX.playHover();
     },
 
+    rotateSelectedPiece: (axis) => {
+      const { pieces, selectedBlockId, selectedPieceId, allowedFloorSet } = get();
+      const activeId = selectedBlockId ?? selectedPieceId;
+      if (!activeId) return false;
+
+      const target = pieces.find((p) => p.id === activeId);
+      if (!target) return false;
+
+      const currentRot: [number, number, number] = target.rotation ?? [0, 0, 0];
+      const { dims: nextDims, rotation: nextRotation } = rotatePieceByAxis(
+        target.dims,
+        currentRot,
+        axis
+      );
+
+      const otherPieces = pieces.filter((p) => p.id !== activeId);
+      const settledOthers = settlePiecesWithGravity(otherPieces);
+      const settledOtherBlocks = deriveBlocksFromPieces(settledOthers);
+
+      const wasInStaging = target.position[2] >= STAGING_Z_MIN;
+
+      // Search nearby (dx, dz) offsets around current anchor so rotating a 2-unit block near an edge or garden
+      // automatically snaps onto the nearest valid foundation / staging cells.
+      const searchOffsets: Array<[number, number]> = [
+        [0, 0],
+        [-1, 0],
+        [1, 0],
+        [0, -1],
+        [0, 1],
+        [-1, -1],
+        [1, -1],
+        [-1, 1],
+        [1, 1],
+        [-2, 0],
+        [2, 0],
+        [0, -2],
+        [0, 2],
+      ];
+
+      let chosenPos: [number, number, number] | null = null;
+
+      for (const [ox, oz] of searchOffsets) {
+        const rawX = target.position[0] + ox;
+        const rawZ = target.position[2] + oz;
+        const candX = Math.max(
+          GRID_MIN,
+          Math.min(GRID_MAX - nextDims[0] + 1, rawX)
+        );
+        const minZBound = wasInStaging ? STAGING_Z_MIN : GRID_Z_MIN;
+        const maxZBound = wasInStaging
+          ? ALL_Z_MAX - nextDims[2] + 1
+          : GRID_Z_MAX - nextDims[2] + 1;
+        const candZ = Math.max(minZBound, Math.min(maxZBound, rawZ));
+
+        const dropY = calculateGravityDrop(
+          candX,
+          candZ,
+          settledOtherBlocks,
+          activeId,
+          nextDims
+        );
+        const candPos: [number, number, number] = [candX, dropY, candZ];
+
+        const testPieces = pieces.map((p) =>
+          p.id === activeId
+            ? { ...p, dims: nextDims, rotation: nextRotation, position: candPos }
+            : settledOthers.find((s) => s.id === p.id) ?? p
+        );
+
+        if (
+          isValidPiecePosition(
+            testPieces,
+            activeId,
+            candPos,
+            nextDims,
+            allowedFloorSet
+          )
+        ) {
+          chosenPos = candPos;
+          break;
+        }
+      }
+
+      if (!chosenPos) {
+        return false;
+      }
+
+      const updatedPieces = pieces.map((p) =>
+        p.id === activeId
+          ? {
+              ...p,
+              dims: nextDims,
+              rotation: nextRotation,
+              position: chosenPos!,
+            }
+          : settledOthers.find((s) => s.id === p.id) ?? p
+      );
+
+      const nextPieces = settlePiecesWithGravity(updatedPieces);
+      const nextBlocks = deriveBlocksFromPieces(nextPieces);
+
+      soundFX.playToggle(chosenPos[2] <= GRID_Z_MAX, [
+        axis === 'x' ? 1 : 0,
+        axis === 'y' ? 1 : 0,
+        axis === 'z' ? 1 : 0,
+      ]);
+
+      set((state) => ({
+        pieces: nextPieces,
+        blocks: nextBlocks,
+        selectedBlockId: activeId,
+        selectedPieceId: activeId,
+        history: [
+          ...state.history.slice(-49),
+          { pieces: state.pieces, blocks: state.blocks },
+        ],
+        blocksHistory: [...state.blocksHistory.slice(-49), state.blocks],
+        movesCount: state.movesCount + 1,
+        lastMoveInfo: `Rotated ${target.name.split(' (')[0]} around ${axis.toUpperCase()}-axis → (${nextDims.join('×')})`,
+      }));
+
+      return true;
+    },
+
     moveSelectedWithGravity: (targetX, targetZ) => {
-      const { pieces, selectedBlockId, selectedPieceId } = get();
+      const { pieces, selectedBlockId, selectedPieceId, allowedFloorSet } = get();
       const activeId = selectedBlockId ?? selectedPieceId;
       if (!activeId) return false;
 
@@ -161,15 +315,18 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
 
       const fromPos: [number, number, number] = [...target.position];
 
-      // Clamp targetX inside [-2..+2] and targetZ inside [-2..ALL_Z_MAX]
+      // Clamp targetX inside [-3..+3] and targetZ inside [-2..ALL_Z_MAX]
+      // Avoid straddling the boundary between Central Zone (z <= 2) and Staging Area (z >= 3)
       const clampedX = Math.max(
         GRID_MIN,
         Math.min(GRID_MAX - target.dims[0] + 1, targetX)
       );
-      const clampedZ = Math.max(
-        GRID_MIN,
-        Math.min(ALL_Z_MAX - target.dims[2] + 1, targetZ)
-      );
+      const isTargetingStaging = targetZ >= STAGING_Z_MIN;
+      const minZ = isTargetingStaging ? STAGING_Z_MIN : GRID_Z_MIN;
+      const maxZ = isTargetingStaging
+        ? ALL_Z_MAX - target.dims[2] + 1
+        : GRID_Z_MAX - target.dims[2] + 1;
+      const clampedZ = Math.max(minZ, Math.min(maxZ, targetZ));
 
       // First settle any remaining pieces as if `activeId` was lifted out
       const otherPieces = pieces.filter((p) => p.id !== activeId);
@@ -208,14 +365,22 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
         return settledOthers.find((s) => s.id === p.id) ?? p;
       });
 
-      if (!isValidPiecePosition(candidatePieces, activeId, candidatePos, target.dims)) {
+      if (
+        !isValidPiecePosition(
+          candidatePieces,
+          activeId,
+          candidatePos,
+          target.dims,
+          allowedFloorSet
+        )
+      ) {
         return false;
       }
 
       const nextPieces = settlePiecesWithGravity(candidatePieces);
       const nextBlocks = deriveBlocksFromPieces(nextPieces);
 
-      const isNowInCentralZone = candidatePos[2] <= GRID_MAX;
+      const isNowInCentralZone = candidatePos[2] <= GRID_Z_MAX;
 
       soundFX.playToggle(isNowInCentralZone, [
         Math.sign(candidatePos[0]),
@@ -247,7 +412,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
     },
 
     nudgePiece: (id, delta) => {
-      const { pieces } = get();
+      const { pieces, allowedFloorSet } = get();
       const target = pieces.find((p) => p.id === id);
       if (!target) return false;
 
@@ -262,7 +427,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
           Math.min(GRID_MAX - target.dims[0] + 1, nextX)
         );
         const clampedZ = Math.max(
-          GRID_MIN,
+          GRID_Z_MIN,
           Math.min(ALL_Z_MAX - target.dims[2] + 1, nextZ)
         );
         const otherPieces = pieces.filter((p) => p.id !== id);
@@ -292,7 +457,15 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
             ? { ...p, position: candidatePos }
             : settledOthers.find((s) => s.id === p.id) ?? p
         );
-        if (!isValidPiecePosition(candidatePieces, id, candidatePos, target.dims)) {
+        if (
+          !isValidPiecePosition(
+            candidatePieces,
+            id,
+            candidatePos,
+            target.dims,
+            allowedFloorSet
+          )
+        ) {
           return false;
         }
         const nextPieces = settlePiecesWithGravity(candidatePieces);
@@ -333,7 +506,15 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
         target.position[2] + delta[2],
       ];
 
-      if (!isValidPiecePosition(pieces, id, candidatePos, target.dims)) {
+      if (
+        !isValidPiecePosition(
+          pieces,
+          id,
+          candidatePos,
+          target.dims,
+          allowedFloorSet
+        )
+      ) {
         return false;
       }
 
@@ -372,7 +553,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
     },
 
     movePieceTo: (id, candidatePos) => {
-      const { pieces } = get();
+      const { pieces, allowedFloorSet } = get();
       const target = pieces.find((p) => p.id === id);
       if (!target) return false;
 
@@ -386,7 +567,15 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
         return false;
       }
 
-      if (!isValidPiecePosition(pieces, id, candidatePos, target.dims)) {
+      if (
+        !isValidPiecePosition(
+          pieces,
+          id,
+          candidatePos,
+          target.dims,
+          allowedFloorSet
+        )
+      ) {
         return false;
       }
 
@@ -428,11 +617,15 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
       const { activeLevelId } = get();
       const fresh = instantiateLevelPieces(activeLevelId);
       const freshBlocks = deriveBlocksFromPieces(fresh);
+      const allowedCells = getLevelAllowedFloorCells(activeLevelId);
+      const allowedSet = buildAllowedFloorSet(allowedCells);
       soundFX.playToggle(true, [0, 0, 0]);
       set((state) => ({
         pieces: fresh,
         blocks: freshBlocks,
         windowCoordinates: getLevelWindowCoordinates(activeLevelId),
+        allowedFloorCells: allowedCells,
+        allowedFloorSet: allowedSet,
         lastCraneTransfer: null,
         targetShadow: getTargetShadow(fresh).targetShadow,
         targetWallShape: getTargetWallShape(fresh),
@@ -453,12 +646,16 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
     setLevel: (levelId) => {
       const fresh = instantiateLevelPieces(levelId);
       const freshBlocks = deriveBlocksFromPieces(fresh);
+      const allowedCells = getLevelAllowedFloorCells(levelId);
+      const allowedSet = buildAllowedFloorSet(allowedCells);
       soundFX.playToggle(true, [0, 1, 0]);
       set({
         activeLevelId: levelId,
         pieces: fresh,
         blocks: freshBlocks,
         windowCoordinates: getLevelWindowCoordinates(levelId),
+        allowedFloorCells: allowedCells,
+        allowedFloorSet: allowedSet,
         lastCraneTransfer: null,
         targetShadow: getTargetShadow(fresh).targetShadow,
         targetWallShape: getTargetWallShape(fresh),
@@ -493,3 +690,4 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
     },
   };
 });
+

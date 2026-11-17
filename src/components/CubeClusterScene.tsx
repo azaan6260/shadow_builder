@@ -18,15 +18,21 @@ import {
   GRID_COORDS,
   GRID_MAX,
   GRID_MIN,
+  GRID_Z_COORDS,
+  GRID_Z_MAX,
+  GRID_Z_MIN,
   LIGHT_POSITION,
   STAGING_Z_COORDS,
+  STAGING_Z_MIN,
   ShapeKind,
   StencilElement,
   WallPiece,
   calculateGravityDrop,
   deriveBlocksFromPieces,
+  getBalconyOffset,
   getPieceWorldCenter,
   isBalconyShadedByBlocks,
+  isValidPiecePosition,
   settlePiecesWithGravity,
 } from '../types/puzzle';
 import type { CraneTransferOp } from '../store/usePuzzleStore';
@@ -48,14 +54,14 @@ export const isSoftwareGl = (() => {
   }
 })();
 
-// Neighboring Building front facade sits at WALL_Z = -3.12, with 3D Balconies jutting out to BALCONY_Z = -2.72
-const WALL_Z = -3.12;
-const BALCONY_Z = -2.72;
-const FLOOR_Y = -2.65;
-const CRANE_JIB_Y = 4.15;
-const CRANE_REST_Y = 3.35;
-const CRANE_PIVOT_X = -3.45;
-const CRANE_PIVOT_Z = 0.25;
+// World coordinates calibrated for compact blocks (spacing = 0.82) across a 7-column (-3..+3) urban plot
+const WALL_Z = -2.56;
+const BALCONY_Z = -2.18;
+const FLOOR_Y = -2.08;
+const CRANE_JIB_Y = 3.85;
+const CRANE_REST_Y = 3.1;
+const CRANE_PIVOT_X = -3.35;
+const CRANE_PIVOT_Z = 0.2;
 
 // Custom depth material so skyscraper modules cast solid real-time shadows onto Neighboring Buildings and Ground
 const SHARED_CUSTOM_DEPTH_MAT = new THREE.MeshDepthMaterial({
@@ -179,21 +185,20 @@ interface CameraControllerProps {
 }
 
 /**
- * Computes an aspect- and orientation-aware orthographic zoom so the entire
- * 3D cityscape (Neighboring Buildings, Gantry Crane, Central Plot, and Staging Area)
- * fits comfortably in mobile portrait, mobile landscape, tablet, and desktop viewports.
+ * Computes an aspect- and orientation-aware orthographic zoom so the 3D cityscape
+ * fills the viewport prominently across desktop, tablet, and mobile screens.
  */
 function computeResponsiveZoom(
   baseZoom: number,
   width: number,
   height: number
 ): number {
-  const safeW = Math.max(240, width - 20);
-  const safeH = Math.max(200, height - 56);
-  const maxZoomByWidth = safeW / 16.0;
-  const maxZoomByHeight = safeH / 14.4;
-  const scale = Math.min(1.08, maxZoomByWidth / 46, maxZoomByHeight / 46);
-  return Math.max(14, baseZoom * scale);
+  const safeW = Math.max(240, width - 16);
+  const safeH = Math.max(200, height - 48);
+  const maxZoomByWidth = safeW / 11.4;
+  const maxZoomByHeight = safeH / 10.2;
+  const scale = Math.min(1.22, maxZoomByWidth / 60, maxZoomByHeight / 60);
+  return Math.max(18, baseZoom * scale);
 }
 
 function CameraController({
@@ -204,10 +209,10 @@ function CameraController({
   const { camera, size } = useThree();
   const isTransitioningPosRef = useRef(true);
   const isTransitioningZoomRef = useRef(true);
-  const baseZoomRef = useRef(46);
-  const targetPosRef = useRef(new THREE.Vector3(13, 12, 14));
+  const baseZoomRef = useRef(60);
+  const targetPosRef = useRef(new THREE.Vector3(12, 10.5, 13));
   const targetZoomRef = useRef(
-    computeResponsiveZoom(46, size.width, size.height)
+    computeResponsiveZoom(60, size.width, size.height)
   );
 
   // When a camera preset is selected, transition both camera position and zoom
@@ -679,23 +684,42 @@ interface BalconyWithPersonProps {
   spacing: number;
 }
 
-const HAPPY_SHIRT_COLORS = ['#0ea5e9', '#10b981', '#f59e0b', '#8b5cf6'];
+const HAPPY_SHIRT_COLORS = [
+  '#0ea5e9',
+  '#10b981',
+  '#f59e0b',
+  '#8b5cf6',
+  '#ec4899',
+  '#14b8a6',
+];
 
-function BalconyWithPerson({
-  wx,
-  wy,
+interface BalconyResidentFigureProps {
+  localX: number;
+  localZ: number;
+  baseRotY: number;
+  scale: number;
+  shirtColor: string;
+  phaseSeed: number;
+  isBlocked: boolean;
+}
+
+/**
+ * Individual 3D resident standing on a Neighboring Building balcony.
+ * Calm and smiling when in the 40° sunlight; stomping, scowling, and waving fists in anger when shaded!
+ */
+function BalconyResidentFigure({
+  localX,
+  localZ,
+  baseRotY,
+  scale,
+  shirtColor,
+  phaseSeed,
   isBlocked,
-  spacing,
-}: BalconyWithPersonProps) {
+}: BalconyResidentFigureProps) {
   const personGroupRef = useRef<THREE.Group>(null);
   const leftArmRef = useRef<THREE.Group>(null);
   const rightArmRef = useRef<THREE.Group>(null);
   const angerBadgeRef = useRef<THREE.Group>(null);
-
-  const worldX = wx * spacing;
-  const worldY = (wy - 2) * spacing;
-  const seed = Math.abs(wx * 7 + wy * 13);
-  const happyShirtColor = HAPPY_SHIRT_COLORS[seed % HAPPY_SHIRT_COLORS.length];
 
   useFrame((state) => {
     const t = state.clock.elapsedTime;
@@ -703,60 +727,323 @@ function BalconyWithPerson({
       if (isBlocked) {
         // Angry stomping / jumping up and down and shaking side to side
         personGroupRef.current.position.y =
-          -0.28 + Math.abs(Math.sin(t * 12 + seed)) * 0.08;
-        personGroupRef.current.rotation.y = Math.sin(t * 10 + seed) * 0.28;
+          -0.25 + Math.abs(Math.sin(t * 13 + phaseSeed)) * 0.075;
+        personGroupRef.current.rotation.y =
+          baseRotY + Math.sin(t * 11 + phaseSeed) * 0.32;
       } else {
-        // Calm gentle breathing / swaying in the sunshine
+        // Calm gentle breathing / chatting in the sunshine
         personGroupRef.current.position.y =
-          -0.28 + Math.sin(t * 2 + seed) * 0.015;
-        personGroupRef.current.rotation.y = Math.sin(t * 1.2 + seed) * 0.08;
+          -0.25 + Math.sin(t * 2.2 + phaseSeed) * 0.012;
+        personGroupRef.current.rotation.y =
+          baseRotY + Math.sin(t * 1.4 + phaseSeed) * 0.1;
       }
     }
 
     if (leftArmRef.current && rightArmRef.current) {
       if (isBlocked) {
         // Arms raised high shaking fists in anger!
-        leftArmRef.current.rotation.z = 2.55 + Math.sin(t * 16 + seed) * 0.35;
-        rightArmRef.current.rotation.z = -2.55 - Math.cos(t * 16 + seed) * 0.35;
+        leftArmRef.current.rotation.z =
+          2.55 + Math.sin(t * 17 + phaseSeed) * 0.38;
+        rightArmRef.current.rotation.z =
+          -2.55 - Math.cos(t * 17 + phaseSeed) * 0.38;
       } else {
-        // Arms resting calmly at sides
-        leftArmRef.current.rotation.z = 0.22 + Math.sin(t * 2 + seed) * 0.05;
-        rightArmRef.current.rotation.z = -0.22 - Math.sin(t * 2 + seed) * 0.05;
+        // Arms resting / gesturing calmly
+        leftArmRef.current.rotation.z =
+          0.22 + Math.sin(t * 2.1 + phaseSeed) * 0.06;
+        rightArmRef.current.rotation.z =
+          -0.22 - Math.sin(t * 2.1 + phaseSeed) * 0.06;
       }
     }
 
     if (angerBadgeRef.current && isBlocked) {
-      angerBadgeRef.current.position.y = 0.64 + Math.sin(t * 10) * 0.05;
-      angerBadgeRef.current.rotation.y = Math.sin(t * 6) * 0.25;
+      angerBadgeRef.current.position.y =
+        0.74 + Math.sin(t * 11 + phaseSeed) * 0.045;
+      angerBadgeRef.current.rotation.y = Math.sin(t * 6 + phaseSeed) * 0.25;
     }
   });
 
   return (
-    <group position={[worldX, worldY, BALCONY_Z]}>
+    <group
+      ref={personGroupRef}
+      position={[localX, -0.25, localZ]}
+      rotation={[0, baseRotY, 0]}
+      scale={[scale, scale, scale]}
+    >
+      {/* Left & Right Legs */}
+      {[-0.06, 0.06].map((lx, idx) => (
+        <mesh
+          key={`leg-${idx}`}
+          position={[lx, 0.1, 0]}
+          castShadow={true}
+          receiveShadow={true}
+          raycast={() => null}
+        >
+          <boxGeometry args={[0.07, 0.2, 0.07]} />
+          <meshStandardMaterial color="#1e293b" roughness={0.8} />
+        </mesh>
+      ))}
+
+      {/* Torso / Jacket (Cheerful color when sunlit, bright angry crimson when shaded) */}
+      <mesh
+        position={[0, 0.29, 0]}
+        castShadow={true}
+        receiveShadow={true}
+        raycast={() => null}
+      >
+        <boxGeometry args={[0.2, 0.22, 0.12]} />
+        <meshStandardMaterial
+          color={isBlocked ? '#dc2626' : shirtColor}
+          emissive={isBlocked ? '#991b1b' : '#000000'}
+          emissiveIntensity={isBlocked ? 0.4 : 0}
+          roughness={0.55}
+        />
+      </mesh>
+
+      {/* Left Arm (Pivoted at shoulder) */}
+      <group ref={leftArmRef} position={[-0.125, 0.38, 0]}>
+        <mesh
+          position={[-0.015, -0.09, 0]}
+          castShadow={false}
+          receiveShadow={false}
+          raycast={() => null}
+        >
+          <boxGeometry args={[0.058, 0.18, 0.058]} />
+          <meshStandardMaterial
+            color={isBlocked ? '#ef4444' : shirtColor}
+            roughness={0.5}
+          />
+        </mesh>
+      </group>
+
+      {/* Right Arm (Pivoted at shoulder) */}
+      <group ref={rightArmRef} position={[0.125, 0.38, 0]}>
+        <mesh
+          position={[0.015, -0.09, 0]}
+          castShadow={false}
+          receiveShadow={false}
+          raycast={() => null}
+        >
+          <boxGeometry args={[0.058, 0.18, 0.058]} />
+          <meshStandardMaterial
+            color={isBlocked ? '#ef4444' : shirtColor}
+            roughness={0.5}
+          />
+        </mesh>
+      </group>
+
+      {/* Head (Flushed red when angry in shadow, warm skin tone when sunlit) */}
+      <group position={[0, 0.49, 0]}>
+        <mesh castShadow={true} receiveShadow={true} raycast={() => null}>
+          <sphereGeometry args={[0.105, 14, 14]} />
+          <meshStandardMaterial
+            color={isBlocked ? '#fca5a5' : '#fde68a'}
+            roughness={0.45}
+          />
+        </mesh>
+
+        {/* Eyes */}
+        {[-0.038, 0.038].map((ex, idx) => (
+          <mesh
+            key={`eye-${idx}`}
+            position={[ex, 0.014, 0.096]}
+            castShadow={false}
+            receiveShadow={false}
+            raycast={() => null}
+          >
+            <sphereGeometry args={[0.016, 8, 8]} />
+            <meshBasicMaterial color="#0f172a" />
+          </mesh>
+        ))}
+
+        {/* Facial Expression: Angry Slanted Eyebrows & Shouting Mouth vs Happy Smile */}
+        {isBlocked ? (
+          <>
+            {/* Left Angry Slanted Eyebrow (\) */}
+            <mesh
+              position={[-0.04, 0.044, 0.1]}
+              rotation={[0, 0, -0.5]}
+              castShadow={false}
+              receiveShadow={false}
+              raycast={() => null}
+            >
+              <boxGeometry args={[0.05, 0.015, 0.014]} />
+              <meshBasicMaterial color="#7f1d1d" />
+            </mesh>
+            {/* Right Angry Slanted Eyebrow (/) */}
+            <mesh
+              position={[0.04, 0.044, 0.1]}
+              rotation={[0, 0, 0.5]}
+              castShadow={false}
+              receiveShadow={false}
+              raycast={() => null}
+            >
+              <boxGeometry args={[0.05, 0.015, 0.014]} />
+              <meshBasicMaterial color="#7f1d1d" />
+            </mesh>
+            {/* Angry Shouting Mouth */}
+            <mesh
+              position={[0, -0.034, 0.098]}
+              castShadow={false}
+              receiveShadow={false}
+              raycast={() => null}
+            >
+              <boxGeometry args={[0.05, 0.034, 0.014]} />
+              <meshBasicMaterial color="#7f1d1d" />
+            </mesh>
+          </>
+        ) : (
+          /* Calm Happy Smile */
+          <mesh
+            position={[0, -0.032, 0.098]}
+            castShadow={false}
+            receiveShadow={false}
+            raycast={() => null}
+          >
+            <boxGeometry args={[0.045, 0.013, 0.012]} />
+            <meshBasicMaterial color="#0f172a" />
+          </mesh>
+        )}
+      </group>
+
+      {/* Floating Red "!" Anger Exclamation Indicator Above Each Angry Resident */}
+      {isBlocked && (
+        <group ref={angerBadgeRef} position={[0, 0.74, 0]}>
+          <mesh
+            position={[0, 0.075, 0]}
+            castShadow={false}
+            receiveShadow={false}
+            raycast={() => null}
+          >
+            <boxGeometry args={[0.05, 0.135, 0.05]} />
+            <meshBasicMaterial color="#ef4444" />
+          </mesh>
+          <mesh
+            position={[0, -0.035, 0]}
+            castShadow={false}
+            receiveShadow={false}
+            raycast={() => null}
+          >
+            <boxGeometry args={[0.05, 0.05, 0.05]} />
+            <meshBasicMaterial color="#ef4444" />
+          </mesh>
+        </group>
+      )}
+    </group>
+  );
+}
+
+/**
+ * Irregularly positioned 3D Balcony with multiple standing residents (2 or 3 people on most balconies)
+ * who enjoy the sun when lit and get visibly angry when a 40° block shadow lands on them.
+ */
+function BalconyWithPerson({
+  wx,
+  wy,
+  isBlocked,
+  spacing,
+}: BalconyWithPersonProps) {
+  const [offX, offY, offZ] = useMemo(() => getBalconyOffset(wx, wy), [wx, wy]);
+
+  const worldX = (wx + offX) * spacing;
+  const worldY = (wy - 2 + offY) * spacing;
+  const worldZ = BALCONY_Z + offZ * spacing;
+
+  const seed = Math.abs(wx * 17 + wy * 31);
+  // Vary balcony width and number of people (2 or 3 people on most balconies, 1 on compact terraces)
+  const peopleCount = seed % 4 === 0 ? 3 : seed % 4 === 3 ? 1 : 2;
+  const slabWidth = peopleCount === 3 ? 0.86 : peopleCount === 2 ? 0.76 : 0.64;
+  const slabDepth = 0.64;
+
+  const residents = useMemo(() => {
+    if (peopleCount === 3) {
+      return [
+        {
+          localX: -0.22,
+          localZ: 0.04,
+          baseRotY: 0.22,
+          scale: 0.86,
+          shirtColor: HAPPY_SHIRT_COLORS[seed % HAPPY_SHIRT_COLORS.length],
+          phaseSeed: seed * 1.1,
+        },
+        {
+          localX: 0,
+          localZ: -0.03,
+          baseRotY: 0,
+          scale: 0.92,
+          shirtColor:
+            HAPPY_SHIRT_COLORS[(seed + 2) % HAPPY_SHIRT_COLORS.length],
+          phaseSeed: seed * 2.3 + 1.7,
+        },
+        {
+          localX: 0.22,
+          localZ: 0.05,
+          baseRotY: -0.22,
+          scale: 0.84,
+          shirtColor:
+            HAPPY_SHIRT_COLORS[(seed + 4) % HAPPY_SHIRT_COLORS.length],
+          phaseSeed: seed * 3.1 + 3.4,
+        },
+      ];
+    }
+    if (peopleCount === 2) {
+      return [
+        {
+          localX: -0.15,
+          localZ: 0.03,
+          baseRotY: 0.18,
+          scale: 0.9,
+          shirtColor: HAPPY_SHIRT_COLORS[seed % HAPPY_SHIRT_COLORS.length],
+          phaseSeed: seed * 1.3,
+        },
+        {
+          localX: 0.15,
+          localZ: 0.02,
+          baseRotY: -0.18,
+          scale: 0.86,
+          shirtColor:
+            HAPPY_SHIRT_COLORS[(seed + 3) % HAPPY_SHIRT_COLORS.length],
+          phaseSeed: seed * 2.7 + 2.1,
+        },
+      ];
+    }
+    return [
+      {
+        localX: 0,
+        localZ: 0.04,
+        baseRotY: 0,
+        scale: 0.92,
+        shirtColor: HAPPY_SHIRT_COLORS[seed % HAPPY_SHIRT_COLORS.length],
+        phaseSeed: seed * 1.5,
+      },
+    ];
+  }, [peopleCount, seed]);
+
+  return (
+    <group position={[worldX, worldY, worldZ]}>
       {/* 1. Recessed Apartment Balcony Glass Doorway on Facade */}
       <mesh
-        position={[0, 0.04, WALL_Z - BALCONY_Z + 0.02]}
+        position={[0, 0.02, WALL_Z - worldZ + 0.02]}
         castShadow={false}
         receiveShadow={true}
         raycast={() => null}
       >
-        <planeGeometry args={[0.68, 0.78]} />
+        <planeGeometry args={[slabWidth * 0.78, 0.64]} />
         <meshStandardMaterial
           color={isBlocked ? '#450a0a' : '#fef08a'}
-          emissive={isBlocked ? '#7f1d1d' : '#fde047'}
-          emissiveIntensity={isBlocked ? 0.35 : 0.75}
+          emissive={isBlocked ? '#991b1b' : '#fde047'}
+          emissiveIntensity={isBlocked ? 0.45 : 0.8}
           roughness={0.3}
         />
       </mesh>
 
       {/* 2. Cantilevered Concrete Balcony Floor Slab */}
       <mesh
-        position={[0, -0.34, 0]}
+        position={[0, -0.29, 0]}
         castShadow={true}
         receiveShadow={true}
         raycast={() => null}
       >
-        <boxGeometry args={[0.88, 0.09, 0.72]} />
+        <boxGeometry args={[slabWidth, 0.08, slabDepth]} />
         <meshStandardMaterial
           color={isBlocked ? '#7f1d1d' : '#cbd5e1'}
           roughness={0.8}
@@ -766,15 +1053,15 @@ function BalconyWithPerson({
       </mesh>
 
       {/* 3. Balcony Front & Side Safety Railing + Glass/Steel Guard */}
-      <group position={[0, -0.16, 0]}>
+      <group position={[0, -0.13, 0]}>
         {/* Front Top Handrail */}
         <mesh
-          position={[0, 0.14, 0.33]}
+          position={[0, 0.12, slabDepth * 0.5 - 0.02]}
           castShadow={false}
           receiveShadow={false}
           raycast={() => null}
         >
-          <boxGeometry args={[0.88, 0.04, 0.04]} />
+          <boxGeometry args={[slabWidth, 0.035, 0.035]} />
           <meshStandardMaterial
             color={isBlocked ? '#ef4444' : '#0f172a'}
             roughness={0.4}
@@ -782,15 +1069,15 @@ function BalconyWithPerson({
           />
         </mesh>
         {/* Side Top Handrails */}
-        {[-0.42, 0.42].map((rx, idx) => (
+        {[-slabWidth * 0.5 + 0.02, slabWidth * 0.5 - 0.02].map((rx, idx) => (
           <mesh
             key={`side-rail-${idx}`}
-            position={[rx, 0.14, 0]}
+            position={[rx, 0.12, 0]}
             castShadow={false}
             receiveShadow={false}
             raycast={() => null}
           >
-            <boxGeometry args={[0.04, 0.04, 0.7]} />
+            <boxGeometry args={[0.035, 0.035, slabDepth]} />
             <meshStandardMaterial
               color={isBlocked ? '#ef4444' : '#0f172a'}
               roughness={0.4}
@@ -799,184 +1086,33 @@ function BalconyWithPerson({
           </mesh>
         ))}
         {/* Vertical Railing Balusters */}
-        {[-0.4, -0.2, 0, 0.2, 0.4].map((bx, idx) => (
+        {[-0.36, -0.18, 0, 0.18, 0.36].map((frac, idx) => (
           <mesh
             key={`baluster-${idx}`}
-            position={[bx, 0, 0.33]}
+            position={[frac * slabWidth, 0, slabDepth * 0.5 - 0.02]}
             castShadow={false}
             receiveShadow={false}
             raycast={() => null}
           >
-            <boxGeometry args={[0.025, 0.28, 0.025]} />
+            <boxGeometry args={[0.022, 0.24, 0.022]} />
             <meshStandardMaterial color="#334155" roughness={0.5} metalness={0.6} />
           </mesh>
         ))}
       </group>
 
-      {/* 4. 3D Resident Person Standing on the Balcony */}
-      <group ref={personGroupRef} position={[0, -0.28, 0.05]}>
-        {/* Left & Right Legs */}
-        {[-0.07, 0.07].map((lx, idx) => (
-          <mesh
-            key={`leg-${idx}`}
-            position={[lx, 0.11, 0]}
-            castShadow={true}
-            receiveShadow={true}
-            raycast={() => null}
-          >
-            <boxGeometry args={[0.08, 0.22, 0.08]} />
-            <meshStandardMaterial color="#1e293b" roughness={0.8} />
-          </mesh>
-        ))}
-
-        {/* Torso / Jacket (Cheerful color when sunlit, bright angry crimson when shaded) */}
-        <mesh
-          position={[0, 0.31, 0]}
-          castShadow={true}
-          receiveShadow={true}
-          raycast={() => null}
-        >
-          <boxGeometry args={[0.22, 0.24, 0.13]} />
-          <meshStandardMaterial
-            color={isBlocked ? '#dc2626' : happyShirtColor}
-            emissive={isBlocked ? '#991b1b' : '#000000'}
-            emissiveIntensity={isBlocked ? 0.35 : 0}
-            roughness={0.55}
-          />
-        </mesh>
-
-        {/* Left Arm (Pivoted at shoulder) */}
-        <group ref={leftArmRef} position={[-0.14, 0.4, 0]}>
-          <mesh
-            position={[-0.02, -0.1, 0]}
-            castShadow={false}
-            receiveShadow={false}
-            raycast={() => null}
-          >
-            <boxGeometry args={[0.065, 0.2, 0.065]} />
-            <meshStandardMaterial
-              color={isBlocked ? '#ef4444' : happyShirtColor}
-              roughness={0.5}
-            />
-          </mesh>
-        </group>
-
-        {/* Right Arm (Pivoted at shoulder) */}
-        <group ref={rightArmRef} position={[0.14, 0.4, 0]}>
-          <mesh
-            position={[0.02, -0.1, 0]}
-            castShadow={false}
-            receiveShadow={false}
-            raycast={() => null}
-          >
-            <boxGeometry args={[0.065, 0.2, 0.065]} />
-            <meshStandardMaterial
-              color={isBlocked ? '#ef4444' : happyShirtColor}
-              roughness={0.5}
-            />
-          </mesh>
-        </group>
-
-        {/* Head (Flushed red when angry in shadow, warm skin tone when sunlit) */}
-        <group position={[0, 0.52, 0]}>
-          <mesh castShadow={true} receiveShadow={true} raycast={() => null}>
-            <sphereGeometry args={[0.115, 16, 16]} />
-            <meshStandardMaterial
-              color={isBlocked ? '#fca5a5' : '#fde68a'}
-              roughness={0.45}
-            />
-          </mesh>
-
-          {/* Eyes */}
-          {[-0.042, 0.042].map((ex, idx) => (
-            <mesh
-              key={`eye-${idx}`}
-              position={[ex, 0.015, 0.105]}
-              castShadow={false}
-              receiveShadow={false}
-              raycast={() => null}
-            >
-              <sphereGeometry args={[0.018, 8, 8]} />
-              <meshBasicMaterial color="#0f172a" />
-            </mesh>
-          ))}
-
-          {/* Facial Expression: Angry Slanted Eyebrows & Shouting Mouth vs Happy Smile */}
-          {isBlocked ? (
-            <>
-              {/* Left Angry Slanted Eyebrow (\) */}
-              <mesh
-                position={[-0.045, 0.048, 0.11]}
-                rotation={[0, 0, -0.48]}
-                castShadow={false}
-                receiveShadow={false}
-                raycast={() => null}
-              >
-                <boxGeometry args={[0.055, 0.016, 0.015]} />
-                <meshBasicMaterial color="#7f1d1d" />
-              </mesh>
-              {/* Right Angry Slanted Eyebrow (/) */}
-              <mesh
-                position={[0.045, 0.048, 0.11]}
-                rotation={[0, 0, 0.48]}
-                castShadow={false}
-                receiveShadow={false}
-                raycast={() => null}
-              >
-                <boxGeometry args={[0.055, 0.016, 0.015]} />
-                <meshBasicMaterial color="#7f1d1d" />
-              </mesh>
-              {/* Angry Shouting Mouth */}
-              <mesh
-                position={[0, -0.038, 0.108]}
-                castShadow={false}
-                receiveShadow={false}
-                raycast={() => null}
-              >
-                <boxGeometry args={[0.055, 0.036, 0.015]} />
-                <meshBasicMaterial color="#7f1d1d" />
-              </mesh>
-            </>
-          ) : (
-            /* Calm Happy Smile */
-            <mesh
-              position={[0, -0.035, 0.108]}
-              castShadow={false}
-              receiveShadow={false}
-              raycast={() => null}
-            >
-              <boxGeometry args={[0.05, 0.014, 0.012]} />
-              <meshBasicMaterial color="#0f172a" />
-            </mesh>
-          )}
-        </group>
-
-        {/* 5. Floating Red "!" Anger Exclamation Indicator When in Shadow */}
-        {isBlocked && (
-          <group ref={angerBadgeRef} position={[0, 0.78, 0]}>
-            {/* Exclamation Bar */}
-            <mesh
-              position={[0, 0.08, 0]}
-              castShadow={false}
-              receiveShadow={false}
-              raycast={() => null}
-            >
-              <boxGeometry args={[0.055, 0.15, 0.055]} />
-              <meshBasicMaterial color="#ef4444" />
-            </mesh>
-            {/* Exclamation Dot */}
-            <mesh
-              position={[0, -0.04, 0]}
-              castShadow={false}
-              receiveShadow={false}
-              raycast={() => null}
-            >
-              <boxGeometry args={[0.055, 0.055, 0.055]} />
-              <meshBasicMaterial color="#ef4444" />
-            </mesh>
-          </group>
-        )}
-      </group>
+      {/* 4. Multiple 3D Residents Standing on the Balcony */}
+      {residents.map((res, idx) => (
+        <BalconyResidentFigure
+          key={`resident-${idx}`}
+          localX={res.localX}
+          localZ={res.localZ}
+          baseRotY={res.baseRotY}
+          scale={res.scale}
+          shirtColor={res.shirtColor}
+          phaseSeed={res.phaseSeed}
+          isBlocked={isBlocked}
+        />
+      ))}
     </group>
   );
 }
@@ -984,6 +1120,8 @@ function BalconyWithPerson({
 export interface ShapeMeshProps {
   shape: ShapeKind;
   animatedPosition: SpringValue<[number, number, number]> | [number, number, number];
+  rotation?: [number, number, number];
+  spacing: number;
   isSelected: boolean;
   isHovered: boolean;
   theme: GlassTheme;
@@ -996,6 +1134,8 @@ export interface ShapeMeshProps {
 export function ShapeMesh({
   shape,
   animatedPosition,
+  rotation = [0, 0, 0],
+  spacing,
   isSelected,
   isHovered,
   theme,
@@ -1015,53 +1155,64 @@ export function ShapeMesh({
   const useDeclarativeGeometry =
     shape === 'cube' || shape === 'prism' || shape === 'pyramid';
 
+  // Smoothly animate 3-axis (X, Y, Z) block rotation when the player rotates the block
+  const rotSpring = useSpring({
+    rot: rotation,
+    config: { mass: 1.1, tension: 320, friction: 24 },
+  });
+
   return (
-    <a.mesh
+    <a.group
       position={animatedPosition as unknown as [number, number, number]}
-      geometry={useDeclarativeGeometry ? undefined : geo}
-      rotation={useDeclarativeGeometry ? meshRotation : [0, 0, 0]}
-      customDepthMaterial={SHARED_CUSTOM_DEPTH_MAT}
-      castShadow={true}
-      receiveShadow={true}
-      onClick={onClick}
-      onPointerOver={onPointerOver}
-      onPointerOut={onPointerOut}
+      rotation={rotSpring.rot as unknown as [number, number, number]}
     >
-      {shape === 'cube' && <boxGeometry args={[1, 1, 1]} />}
-      {shape === 'prism' && <cylinderGeometry args={[0.7, 0.7, 1, 3]} />}
-      {shape === 'pyramid' && <cylinderGeometry args={[0, 0.7, 1, 4]} />}
-
-      {/* Modular Skyscraper Unit Material (Pre-Cast Concrete / Curtain Glass / Steel Framing) */}
-      <meshPhysicalMaterial
-        color={isSelected ? '#7dd3fc' : theme.glassColor}
-        roughness={0.55}
-        clearcoat={0.25}
-        clearcoatRoughness={0.25}
-        metalness={0.18}
-        reflectivity={0.45}
-        emissive={isSelected ? '#0284c7' : '#000000'}
-        emissiveIntensity={isSelected ? 0.18 : 0}
-      />
-
-      {/* Steel Framing Structural Edges */}
-      <lineSegments
-        geometry={edges}
-        rotation={
-          shape === 'prism'
-            ? [-Math.PI / 2, 0, 0]
-            : shape === 'pyramid'
-            ? [0, -Math.PI / 4, 0]
-            : [0, 0, 0]
-        }
-        raycast={() => null}
+      <mesh
+        scale={[spacing, spacing, spacing]}
+        geometry={useDeclarativeGeometry ? undefined : geo}
+        rotation={useDeclarativeGeometry ? meshRotation : [0, 0, 0]}
+        customDepthMaterial={SHARED_CUSTOM_DEPTH_MAT}
+        castShadow={true}
+        receiveShadow={true}
+        onClick={onClick}
+        onPointerOver={onPointerOver}
+        onPointerOut={onPointerOut}
       >
-        <lineBasicMaterial
-          color={outerEdgeColor}
-          transparent={true}
-          opacity={isSelected || isHovered ? 1.0 : 0.75}
+        {shape === 'cube' && <boxGeometry args={[1, 1, 1]} />}
+        {shape === 'prism' && <cylinderGeometry args={[0.7, 0.7, 1, 3]} />}
+        {shape === 'pyramid' && <cylinderGeometry args={[0, 0.7, 1, 4]} />}
+
+        {/* Modular Skyscraper Unit Material (Pre-Cast Concrete / Curtain Glass / Steel Framing) */}
+        <meshPhysicalMaterial
+          color={isSelected ? '#7dd3fc' : theme.glassColor}
+          roughness={0.5}
+          clearcoat={0.28}
+          clearcoatRoughness={0.22}
+          metalness={0.2}
+          reflectivity={0.5}
+          emissive={isSelected ? '#0284c7' : '#000000'}
+          emissiveIntensity={isSelected ? 0.2 : 0}
         />
-      </lineSegments>
-    </a.mesh>
+
+        {/* Steel Framing Structural Edges */}
+        <lineSegments
+          geometry={edges}
+          rotation={
+            shape === 'prism'
+              ? [-Math.PI / 2, 0, 0]
+              : shape === 'pyramid'
+              ? [0, -Math.PI / 4, 0]
+              : [0, 0, 0]
+          }
+          raycast={() => null}
+        >
+          <lineBasicMaterial
+            color={outerEdgeColor}
+            transparent={true}
+            opacity={isSelected || isHovered ? 1.0 : 0.8}
+          />
+        </lineSegments>
+      </mesh>
+    </a.group>
   );
 }
 
@@ -1093,7 +1244,7 @@ function MovableShapeMesh({
   onMoveSelectedWithGravity,
 }: MovableShapeMeshProps) {
   const coreRef = useRef<THREE.Mesh>(null);
-  const isPlacedInCentral = piece.position[2] <= GRID_MAX;
+  const isPlacedInCentral = piece.position[2] <= GRID_Z_MAX;
 
   useFrame((state) => {
     if (coreRef.current) {
@@ -1104,8 +1255,8 @@ function MovableShapeMesh({
   const outerEdgeColor = useMemo(() => {
     if (isSelected) return '#0284c7';
     if (isHovered) return theme.hoverEdgeColor;
-    if (isPlacedInCentral) return '#1e293b';
-    return '#475569';
+    if (isPlacedInCentral) return '#0f172a';
+    return '#334155';
   }, [isSelected, isHovered, isPlacedInCentral, theme]);
 
   const resolveClickedColumn = (
@@ -1129,8 +1280,6 @@ function MovableShapeMesh({
     if (e.delta > 10) return;
     e.stopPropagation();
 
-    // If another block is currently selected, tapping/clicking this block stacks the selected block
-    // on top of this block's (targetX, targetZ) column via calculateGravityDrop!
     if (selectedPieceId && selectedPieceId !== piece.id) {
       const [colX, colZ] = resolveClickedColumn(e.point);
       const moved = onMoveSelectedWithGravity(colX, colZ);
@@ -1140,7 +1289,6 @@ function MovableShapeMesh({
       }
     }
 
-    // Toggle selection of this block
     if (isSelected) {
       onSelect(null);
     } else {
@@ -1150,10 +1298,12 @@ function MovableShapeMesh({
 
   return (
     <group name={piece.id}>
-      {/* Render Modular Skyscraper Unit synchronized with the Tower Crane */}
+      {/* Render Compact Modular Skyscraper Unit synchronized with the Tower Crane & 3-Axis Rotation */}
       <ShapeMesh
         shape={piece.shape}
         animatedPosition={animatedPosition}
+        rotation={piece.rotation ?? [0, 0, 0]}
+        spacing={spacing}
         isSelected={isSelected}
         isHovered={isHovered}
         theme={theme}
@@ -1179,9 +1329,9 @@ function MovableShapeMesh({
         {isSelected && (
           <mesh
             scale={[
-              piece.dims[0] * spacing + 0.08,
-              piece.dims[1] * spacing + 0.08,
-              piece.dims[2] * spacing + 0.08,
+              piece.dims[0] * spacing + 0.06,
+              piece.dims[1] * spacing + 0.06,
+              piece.dims[2] * spacing + 0.06,
             ]}
             castShadow={false}
             receiveShadow={false}
@@ -1191,7 +1341,7 @@ function MovableShapeMesh({
             <meshBasicMaterial
               color="#38bdf8"
               transparent
-              opacity={0.18}
+              opacity={0.2}
               depthWrite={false}
             />
             <Edges scale={1.0} threshold={15} color="#0284c7" />
@@ -1202,6 +1352,7 @@ function MovableShapeMesh({
         <mesh
           ref={coreRef}
           geometry={SHARED_CORE_NODE_GEO}
+          scale={[spacing, spacing, spacing]}
           castShadow={false}
           receiveShadow={false}
           raycast={() => null}
@@ -1218,11 +1369,666 @@ function MovableShapeMesh({
 }
 
 /**
- * Urban Cityscape Stage with Neighboring Buildings, 3D Balconies with People,
- * Central Building Zone (z: -2..2), and Foreground Staging Area (z: 3..4).
+ * Restricted Courtyard Garden Cell inside the Central Building Zone (Non-Buildable Setback Cell)
+ * Renders a landscaped stone planter bed with lush green lawn turf, manicured shrubs/hedges,
+ * colorful flower clusters, and occasional courtyard trees so players clearly see where blocks CANNOT be placed.
+ */
+function CourtyardGardenCell({
+  x,
+  z,
+  spacing,
+  isHoveredInvalid,
+  onHover,
+}: {
+  x: number;
+  z: number;
+  spacing: number;
+  isHoveredInvalid: boolean;
+  onHover: (col: [number, number] | null) => void;
+}) {
+  const seed = Math.abs(x * 19 + z * 37);
+  const hasMiniTree = (x + z) % 2 === 0 && z >= -1;
+  const flowerColor =
+    seed % 3 === 0 ? '#f43f5e' : seed % 3 === 1 ? '#fbbf24' : '#c084fc';
+
+  return (
+    <group
+      position={[x * spacing, 0.015, z * spacing]}
+      scale={[spacing, 1, spacing]}
+    >
+      {/* Stone Planter Curb Base */}
+      <mesh
+        position={[0, 0.015, 0]}
+        receiveShadow={true}
+        castShadow={false}
+        onPointerOver={(e) => {
+          e.stopPropagation();
+          onHover([x, z]);
+        }}
+        onPointerOut={(e) => {
+          e.stopPropagation();
+          onHover(null);
+        }}
+      >
+        <boxGeometry args={[0.92, 0.04, 0.92]} />
+        <meshStandardMaterial
+          color={isHoveredInvalid ? '#ef4444' : '#15803d'}
+          roughness={0.9}
+        />
+        <Edges
+          scale={1.0}
+          threshold={15}
+          color={isHoveredInvalid ? '#b91c1c' : '#166534'}
+        />
+      </mesh>
+
+      {/* Manicured Boxwood Hedge / Shrub Mound */}
+      <mesh
+        position={[-0.22, 0.075, -0.18]}
+        castShadow={false}
+        receiveShadow={true}
+        raycast={() => null}
+      >
+        <sphereGeometry args={[0.14, 10, 10]} />
+        <meshStandardMaterial color="#16a34a" roughness={0.85} />
+      </mesh>
+      <mesh
+        position={[0.22, 0.065, 0.2]}
+        castShadow={false}
+        receiveShadow={true}
+        raycast={() => null}
+      >
+        <sphereGeometry args={[0.12, 10, 10]} />
+        <meshStandardMaterial color="#22c55e" roughness={0.85} />
+      </mesh>
+
+      {/* Colorful Flower Cluster */}
+      <mesh
+        position={[0.18, 0.06, -0.2]}
+        castShadow={false}
+        receiveShadow={false}
+        raycast={() => null}
+      >
+        <sphereGeometry args={[0.065, 8, 8]} />
+        <meshStandardMaterial color={flowerColor} roughness={0.6} />
+      </mesh>
+
+      {/* Miniature Ornamental Courtyard Tree (low profile so crane clears easily) */}
+      {hasMiniTree && (
+        <group position={[0, 0.03, 0]}>
+          <mesh
+            position={[0, 0.08, 0]}
+            castShadow={false}
+            receiveShadow={false}
+            raycast={() => null}
+          >
+            <cylinderGeometry args={[0.03, 0.04, 0.16, 8]} />
+            <meshStandardMaterial color="#78350f" roughness={0.9} />
+          </mesh>
+          <mesh
+            position={[0, 0.21, 0]}
+            castShadow={false}
+            receiveShadow={true}
+            raycast={() => null}
+          >
+            <coneGeometry args={[0.19, 0.26, 10]} />
+            <meshStandardMaterial color="#15803d" roughness={0.8} />
+          </mesh>
+        </group>
+      )}
+    </group>
+  );
+}
+
+/**
+ * Realistic Surrounding Urban Environment:
+ * - Sky backdrop & 9 animated drifting 3D volumetric clouds
+ * - Flock of 12 animated 3D flying birds with flapping wings
+ * - Asphalt perimeter avenues with lane markings, zebra crosswalks, sidewalks & streetlamps
+ * - 8 animated 3D cars/taxis/vans driving smoothly along the roads
+ * - West Botanical Park & East Civic Garden Plaza with lawns, trees, flower beds, benches & fountain
+ * - 8 additional surrounding high-rise and mid-rise city buildings
+ */
+function RealisticCityEnvironment() {
+  const cloudsRef = useRef<THREE.Group>(null);
+  const birdsRef = useRef<THREE.Group>(null);
+  const carsRef = useRef<THREE.Group>(null);
+
+  const cloudConfigs = useMemo(
+    () => [
+      { x: -11, y: 7.4, z: -8.5, scale: 1.15, speed: 0.28 },
+      { x: -4.5, y: 8.1, z: -10.2, scale: 1.35, speed: 0.22 },
+      { x: 3.5, y: 7.6, z: -9.0, scale: 1.05, speed: 0.31 },
+      { x: 10.5, y: 8.3, z: -7.8, scale: 1.25, speed: 0.25 },
+      { x: -9.5, y: 7.9, z: -2.2, scale: 0.95, speed: 0.34 },
+      { x: 9.8, y: 7.5, z: -1.5, scale: 1.1, speed: 0.29 },
+      { x: -7.2, y: 8.4, z: 5.5, scale: 1.2, speed: 0.24 },
+      { x: 6.8, y: 8.0, z: 6.2, scale: 1.0, speed: 0.32 },
+    ],
+    []
+  );
+
+  const birdConfigs = useMemo(
+    () =>
+      Array.from({ length: 12 }).map((_, i) => ({
+        radiusX: 5.5 + (i % 4) * 1.4,
+        radiusZ: 4.2 + (i % 3) * 1.3,
+        baseY: 4.9 + (i % 5) * 0.45,
+        speed: 0.42 + (i % 4) * 0.07,
+        phase: (i * Math.PI) / 6,
+        flapSpeed: 10 + (i % 3) * 2.5,
+      })),
+    []
+  );
+
+  const carConfigs = useMemo(
+    () => [
+      // South Boulevard (+X and -X lanes at z = 5.05 and z = 5.65)
+      { axis: 'x' as const, laneZ: 5.05, dir: 1, speed: 2.3, offset: -10, color: '#ef4444', isTaxi: false },
+      { axis: 'x' as const, laneZ: 5.05, dir: 1, speed: 2.3, offset: 2, color: '#eab308', isTaxi: true },
+      { axis: 'x' as const, laneZ: 5.65, dir: -1, speed: 2.1, offset: -4, color: '#3b82f6', isTaxi: false },
+      { axis: 'x' as const, laneZ: 5.65, dir: -1, speed: 2.1, offset: 8, color: '#10b981', isTaxi: false },
+      // North Cross Street (+X and -X lanes at z = -4.55 and z = -5.1)
+      { axis: 'x' as const, laneZ: -4.55, dir: 1, speed: 1.9, offset: -6, color: '#f97316', isTaxi: false },
+      { axis: 'x' as const, laneZ: -5.1, dir: -1, speed: 2.0, offset: 5, color: '#eab308', isTaxi: true },
+      // West Avenue (x = -4.55, moving along Z)
+      { axis: 'z' as const, laneX: -4.55, dir: 1, speed: 1.85, offset: -7, color: '#8b5cf6', isTaxi: false },
+      // East Avenue (x = 4.55, moving along -Z)
+      { axis: 'z' as const, laneX: 4.55, dir: -1, speed: 1.95, offset: 4, color: '#f8fafc', isTaxi: false },
+    ],
+    []
+  );
+
+  const outerBuildings = useMemo(
+    () => [
+      // Northwest High-Rise Glass Tower
+      { x: -7.4, z: -6.8, w: 2.4, h: 6.4, d: 2.2, color: '#334155', accent: '#38bdf8' },
+      // North-Central Civic Tower
+      { x: -3.2, z: -6.9, w: 2.2, h: 5.6, d: 2.0, color: '#1e293b', accent: '#60a5fa' },
+      { x: 3.2, z: -6.9, w: 2.3, h: 5.9, d: 2.0, color: '#334155', accent: '#38bdf8' },
+      // Northeast Modern Skyscraper
+      { x: 7.4, z: -6.8, w: 2.5, h: 6.8, d: 2.2, color: '#1e293b', accent: '#7dd3fc' },
+      // Far West Mid-Rise Terrace Building
+      { x: -10.2, z: -1.8, w: 2.1, h: 4.6, d: 2.6, color: '#475569', accent: '#93c5fd' },
+      // Far East Mid-Rise Office Building
+      { x: 10.2, z: -1.8, w: 2.1, h: 4.9, d: 2.6, color: '#475569', accent: '#38bdf8' },
+      // Southwest Corner Commercial Block
+      { x: -8.6, z: 7.6, w: 2.4, h: 3.6, d: 2.0, color: '#334155', accent: '#fbbf24' },
+      // Southeast Corner Commercial Block
+      { x: 8.6, z: 7.6, w: 2.4, h: 3.8, d: 2.0, color: '#334155', accent: '#34d399' },
+    ],
+    []
+  );
+
+  const parkTrees = useMemo(
+    () => [
+      // West Botanical Park Trees
+      { x: -6.2, z: -2.2, scale: 1.05, pine: true },
+      { x: -7.5, z: -2.6, scale: 1.15, pine: false },
+      { x: -8.4, z: -1.2, scale: 0.95, pine: true },
+      { x: -6.4, z: 0.4, scale: 1.1, pine: false },
+      { x: -8.2, z: 1.5, scale: 1.2, pine: false },
+      { x: -6.3, z: 2.8, scale: 0.95, pine: true },
+      { x: -7.8, z: 3.2, scale: 1.05, pine: false },
+      // East Civic Garden Plaza Trees
+      { x: 6.2, z: -2.2, scale: 1.1, pine: false },
+      { x: 7.6, z: -2.5, scale: 1.0, pine: true },
+      { x: 8.4, z: -0.9, scale: 1.15, pine: false },
+      { x: 6.3, z: 0.6, scale: 0.95, pine: true },
+      { x: 8.1, z: 1.6, scale: 1.1, pine: false },
+      { x: 6.4, z: 2.9, scale: 1.05, pine: false },
+      { x: 7.7, z: 3.3, scale: 0.95, pine: true },
+      // Boulevard Street Trees
+      { x: -3.2, z: 4.35, scale: 0.78, pine: false },
+      { x: 0.0, z: 4.35, scale: 0.78, pine: false },
+      { x: 3.2, z: 4.35, scale: 0.78, pine: false },
+    ],
+    []
+  );
+
+  useFrame((state) => {
+    const t = state.clock.elapsedTime;
+
+    // 1. Animate drifting volumetric clouds
+    if (cloudsRef.current) {
+      cloudsRef.current.children.forEach((cloud, idx) => {
+        const cfg = cloudConfigs[idx];
+        if (!cfg) return;
+        const span = 28;
+        cloud.position.x =
+          ((cfg.x + t * cfg.speed + span * 0.5) % span) - span * 0.5;
+      });
+    }
+
+    // 2. Animate flying birds with flapping wings
+    if (birdsRef.current) {
+      birdsRef.current.children.forEach((bird, idx) => {
+        const cfg = birdConfigs[idx];
+        if (!cfg) return;
+        const angle = t * cfg.speed + cfg.phase;
+        const bx = Math.cos(angle) * cfg.radiusX;
+        const bz = Math.sin(angle * 1.2) * cfg.radiusZ - 0.8;
+        const by = cfg.baseY + Math.sin(t * 1.8 + cfg.phase) * 0.22;
+
+        const dx = -Math.sin(angle) * cfg.radiusX * cfg.speed;
+        const dz = Math.cos(angle * 1.2) * cfg.radiusZ * cfg.speed * 1.2;
+
+        bird.position.set(bx, by, bz);
+        bird.rotation.y = Math.atan2(dx, dz);
+
+        const leftWing = bird.children[1];
+        const rightWing = bird.children[2];
+        const flap = Math.sin(t * cfg.flapSpeed + cfg.phase) * 0.55;
+        if (leftWing) leftWing.rotation.z = flap;
+        if (rightWing) rightWing.rotation.z = -flap;
+      });
+    }
+
+    // 3. Animate 3D road vehicles
+    if (carsRef.current) {
+      carsRef.current.children.forEach((car, idx) => {
+        const cfg = carConfigs[idx];
+        if (!cfg) return;
+        const range = 26;
+        const posAlong =
+          (((cfg.offset + t * cfg.speed * cfg.dir) % range) + range) % range -
+          range * 0.5;
+
+        if (cfg.axis === 'x') {
+          car.position.set(posAlong, FLOOR_Y + 0.13, cfg.laneZ!);
+          car.rotation.y = cfg.dir > 0 ? 0 : Math.PI;
+        } else {
+          car.position.set(cfg.laneX!, FLOOR_Y + 0.13, posAlong);
+          car.rotation.y = cfg.dir > 0 ? -Math.PI / 2 : Math.PI / 2;
+        }
+      });
+    }
+  });
+
+  return (
+    <group name="realistic-city-environment">
+      {/* ================================================================= */}
+      {/* 1. DRIFTING 3D VOLUMETRIC CLOUDS IN THE SKY                       */}
+      {/* ================================================================= */}
+      <group ref={cloudsRef}>
+        {cloudConfigs.map((cfg, idx) => (
+          <group
+            key={`cloud-${idx}`}
+            position={[cfg.x, cfg.y, cfg.z]}
+            scale={[cfg.scale, cfg.scale, cfg.scale]}
+          >
+            <mesh position={[0, 0, 0]} castShadow={false} receiveShadow={false} raycast={() => null}>
+              <sphereGeometry args={[0.62, 12, 12]} />
+              <meshStandardMaterial color="#ffffff" roughness={0.95} />
+            </mesh>
+            <mesh position={[-0.52, -0.08, 0.12]} castShadow={false} receiveShadow={false} raycast={() => null}>
+              <sphereGeometry args={[0.46, 10, 10]} />
+              <meshStandardMaterial color="#f8fafc" roughness={0.95} />
+            </mesh>
+            <mesh position={[0.54, -0.06, -0.08]} castShadow={false} receiveShadow={false} raycast={() => null}>
+              <sphereGeometry args={[0.48, 10, 10]} />
+              <meshStandardMaterial color="#f8fafc" roughness={0.95} />
+            </mesh>
+            <mesh position={[0.18, 0.22, 0.18]} castShadow={false} receiveShadow={false} raycast={() => null}>
+              <sphereGeometry args={[0.42, 10, 10]} />
+              <meshStandardMaterial color="#ffffff" roughness={0.95} />
+            </mesh>
+          </group>
+        ))}
+      </group>
+
+      {/* ================================================================= */}
+      {/* 2. ANIMATED FLOCK OF 3D FLYING BIRDS WITH FLAPPING WINGS          */}
+      {/* ================================================================= */}
+      <group ref={birdsRef}>
+        {birdConfigs.map((_, idx) => (
+          <group key={`bird-${idx}`}>
+            {/* Bird Body */}
+            <mesh castShadow={false} receiveShadow={false} raycast={() => null}>
+              <boxGeometry args={[0.06, 0.045, 0.18]} />
+              <meshStandardMaterial color="#1e293b" roughness={0.6} />
+            </mesh>
+            {/* Left Flapping Wing */}
+            <group position={[-0.03, 0.01, 0]}>
+              <mesh position={[-0.09, 0, 0]} castShadow={false} receiveShadow={false} raycast={() => null}>
+                <boxGeometry args={[0.18, 0.015, 0.08]} />
+                <meshStandardMaterial color="#334155" roughness={0.6} />
+              </mesh>
+            </group>
+            {/* Right Flapping Wing */}
+            <group position={[0.03, 0.01, 0]}>
+              <mesh position={[0.09, 0, 0]} castShadow={false} receiveShadow={false} raycast={() => null}>
+                <boxGeometry args={[0.18, 0.015, 0.08]} />
+                <meshStandardMaterial color="#334155" roughness={0.6} />
+              </mesh>
+            </group>
+          </group>
+        ))}
+      </group>
+
+      {/* ================================================================= */}
+      {/* 3. ASPHALT ROADS, LANE MARKINGS, CROSSWALKS & STREETLIGHTS        */}
+      {/* ================================================================= */}
+      <group position={[0, FLOOR_Y, 0]}>
+        {/* South Boulevard (z = 5.35) */}
+        <mesh
+          rotation={[-Math.PI / 2, 0, 0]}
+          position={[0, -0.01, 5.35]}
+          receiveShadow={true}
+          raycast={() => null}
+        >
+          <planeGeometry args={[28, 1.45]} />
+          <meshStandardMaterial color="#1e293b" roughness={0.92} />
+        </mesh>
+        {/* North Cross Street (z = -4.82) */}
+        <mesh
+          rotation={[-Math.PI / 2, 0, 0]}
+          position={[0, -0.01, -4.82]}
+          receiveShadow={true}
+          raycast={() => null}
+        >
+          <planeGeometry args={[28, 1.35]} />
+          <meshStandardMaterial color="#1e293b" roughness={0.92} />
+        </mesh>
+        {/* West Avenue (x = -4.55) */}
+        <mesh
+          rotation={[-Math.PI / 2, 0, 0]}
+          position={[-4.55, -0.008, 0.3]}
+          receiveShadow={true}
+          raycast={() => null}
+        >
+          <planeGeometry args={[1.25, 22]} />
+          <meshStandardMaterial color="#1e293b" roughness={0.92} />
+        </mesh>
+        {/* East Avenue (x = 4.55) */}
+        <mesh
+          rotation={[-Math.PI / 2, 0, 0]}
+          position={[4.55, -0.008, 0.3]}
+          receiveShadow={true}
+          raycast={() => null}
+        >
+          <planeGeometry args={[1.25, 22]} />
+          <meshStandardMaterial color="#1e293b" roughness={0.92} />
+        </mesh>
+
+        {/* Dashed Center Road Markings on South Boulevard */}
+        {Array.from({ length: 15 }).map((_, i) => (
+          <mesh
+            key={`south-dash-${i}`}
+            rotation={[-Math.PI / 2, 0, 0]}
+            position={[-11.2 + i * 1.6, 0.002, 5.35]}
+            raycast={() => null}
+          >
+            <planeGeometry args={[0.75, 0.06]} />
+            <meshBasicMaterial color="#f8fafc" />
+          </mesh>
+        ))}
+
+        {/* Dashed Road Markings on West & East Avenues */}
+        {Array.from({ length: 10 }).map((_, i) => (
+          <React.Fragment key={`ave-dash-${i}`}>
+            <mesh
+              rotation={[-Math.PI / 2, 0, 0]}
+              position={[-4.55, 0.002, -6.5 + i * 1.5]}
+              raycast={() => null}
+            >
+              <planeGeometry args={[0.06, 0.68]} />
+              <meshBasicMaterial color="#fbbf24" />
+            </mesh>
+            <mesh
+              rotation={[-Math.PI / 2, 0, 0]}
+              position={[4.55, 0.002, -6.5 + i * 1.5]}
+              raycast={() => null}
+            >
+              <planeGeometry args={[0.06, 0.68]} />
+              <meshBasicMaterial color="#fbbf24" />
+            </mesh>
+          </React.Fragment>
+        ))}
+
+        {/* Zebra Crosswalks at Intersections */}
+        {[-3.6, 3.6].map((cx, cIdx) => (
+          <group key={`crosswalk-${cIdx}`} position={[cx, 0.003, 5.35]}>
+            {[-0.45, -0.22, 0, 0.22, 0.45].map((dz, sIdx) => (
+              <mesh
+                key={`stripe-${sIdx}`}
+                rotation={[-Math.PI / 2, 0, 0]}
+                position={[0, 0, dz]}
+                raycast={() => null}
+              >
+                <planeGeometry args={[0.42, 0.11]} />
+                <meshBasicMaterial color="#f8fafc" />
+              </mesh>
+            ))}
+          </group>
+        ))}
+
+        {/* Streetlamps along the Boulevard & Parks */}
+        {[
+          [-3.7, 4.45],
+          [-1.2, 4.45],
+          [1.2, 4.45],
+          [3.7, 4.45],
+          [-5.35, -1.8],
+          [-5.35, 1.8],
+          [5.35, -1.8],
+          [5.35, 1.8],
+        ].map(([lx, lz], idx) => (
+          <group key={`streetlamp-${idx}`} position={[lx, 0, lz]}>
+            <mesh position={[0, 0.42, 0]} raycast={() => null}>
+              <cylinderGeometry args={[0.025, 0.035, 0.84, 8]} />
+              <meshStandardMaterial color="#334155" metalness={0.7} roughness={0.4} />
+            </mesh>
+            <mesh position={[0, 0.86, 0]} raycast={() => null}>
+              <sphereGeometry args={[0.075, 10, 10]} />
+              <meshStandardMaterial
+                color="#fef08a"
+                emissive="#facc15"
+                emissiveIntensity={0.85}
+              />
+            </mesh>
+          </group>
+        ))}
+      </group>
+
+      {/* ================================================================= */}
+      {/* 4. MOVING 3D CARS, TAXIS & VANS ON THE ROADS                      */}
+      {/* ================================================================= */}
+      <group ref={carsRef}>
+        {carConfigs.map((cfg, idx) => (
+          <group key={`car-${idx}`}>
+            {/* Lower Car Chassis */}
+            <mesh castShadow={true} receiveShadow={true} raycast={() => null}>
+              <boxGeometry args={[0.58, 0.15, 0.3]} />
+              <meshStandardMaterial color={cfg.color} roughness={0.35} metalness={0.3} />
+            </mesh>
+            {/* Upper Cabin & Windshield */}
+            <mesh position={[-0.03, 0.12, 0]} castShadow={true} raycast={() => null}>
+              <boxGeometry args={[0.32, 0.12, 0.26]} />
+              <meshStandardMaterial color="#0f172a" roughness={0.2} metalness={0.6} />
+            </mesh>
+            {/* Taxi Roof Sign */}
+            {cfg.isTaxi && (
+              <mesh position={[-0.02, 0.2, 0]} raycast={() => null}>
+                <boxGeometry args={[0.1, 0.04, 0.08]} />
+                <meshBasicMaterial color="#fef08a" />
+              </mesh>
+            )}
+            {/* 4 Wheels */}
+            {[
+              [-0.18, -0.07, 0.15],
+              [0.18, -0.07, 0.15],
+              [-0.18, -0.07, -0.15],
+              [0.18, -0.07, -0.15],
+            ].map(([wx, wy, wz], wIdx) => (
+              <mesh
+                key={`wheel-${wIdx}`}
+                position={[wx, wy, wz]}
+                rotation={[Math.PI / 2, 0, 0]}
+                raycast={() => null}
+              >
+                <cylinderGeometry args={[0.06, 0.06, 0.04, 10]} />
+                <meshStandardMaterial color="#090d16" roughness={0.9} />
+              </mesh>
+            ))}
+          </group>
+        ))}
+      </group>
+
+      {/* ================================================================= */}
+      {/* 5. URBAN GARDENS, BOTANICAL PARKS, FOUNTAIN & LUSH TREES          */}
+      {/* ================================================================= */}
+      <group position={[0, FLOOR_Y, 0]}>
+        {/* West Botanical Park Lawn (x = -7.3, z = 0.3) */}
+        <mesh
+          rotation={[-Math.PI / 2, 0, 0]}
+          position={[-7.3, 0.005, 0.3]}
+          receiveShadow={true}
+          raycast={() => null}
+        >
+          <planeGeometry args={[3.9, 8.2]} />
+          <meshStandardMaterial color="#15803d" roughness={0.92} />
+        </mesh>
+
+        {/* East Civic Garden Plaza Lawn (x = 7.3, z = 0.3) */}
+        <mesh
+          rotation={[-Math.PI / 2, 0, 0]}
+          position={[7.3, 0.005, 0.3]}
+          receiveShadow={true}
+          raycast={() => null}
+        >
+          <planeGeometry args={[3.9, 8.2]} />
+          <meshStandardMaterial color="#15803d" roughness={0.92} />
+        </mesh>
+
+        {/* Circular Park Fountain & Reflecting Pond in West Park */}
+        <group position={[-7.2, 0.02, 0.2]}>
+          <mesh receiveShadow={true} raycast={() => null}>
+            <cylinderGeometry args={[0.85, 0.92, 0.12, 24]} />
+            <meshStandardMaterial color="#cbd5e1" roughness={0.7} />
+          </mesh>
+          <mesh position={[0, 0.05, 0]} raycast={() => null}>
+            <cylinderGeometry args={[0.74, 0.74, 0.04, 24]} />
+            <meshStandardMaterial color="#0284c7" roughness={0.15} metalness={0.3} />
+          </mesh>
+          <mesh position={[0, 0.18, 0]} raycast={() => null}>
+            <cylinderGeometry args={[0.12, 0.18, 0.28, 16]} />
+            <meshStandardMaterial color="#94a3b8" roughness={0.5} />
+          </mesh>
+        </group>
+
+        {/* Circular Rose Garden Pavilion in East Park */}
+        <group position={[7.2, 0.02, 0.2]}>
+          <mesh receiveShadow={true} raycast={() => null}>
+            <cylinderGeometry args={[0.82, 0.88, 0.08, 24]} />
+            <meshStandardMaterial color="#e2e8f0" roughness={0.8} />
+          </mesh>
+          <mesh position={[0, 0.06, 0]} raycast={() => null}>
+            <cylinderGeometry args={[0.55, 0.6, 0.06, 20]} />
+            <meshStandardMaterial color="#16a34a" roughness={0.85} />
+          </mesh>
+          <mesh position={[0, 0.12, 0]} raycast={() => null}>
+            <sphereGeometry args={[0.22, 12, 12]} />
+            <meshStandardMaterial color="#f43f5e" roughness={0.7} />
+          </mesh>
+        </group>
+
+        {/* 3D Deciduous & Pine Trees Across the Urban Parks & Boulevards */}
+        {parkTrees.map((tree, idx) => (
+          <group
+            key={`park-tree-${idx}`}
+            position={[tree.x, 0, tree.z]}
+            scale={[tree.scale, tree.scale, tree.scale]}
+          >
+            {/* Tree Trunk */}
+            <mesh position={[0, 0.22, 0]} castShadow={true} receiveShadow={true} raycast={() => null}>
+              <cylinderGeometry args={[0.06, 0.09, 0.44, 8]} />
+              <meshStandardMaterial color="#78350f" roughness={0.9} />
+            </mesh>
+            {tree.pine ? (
+              <>
+                <mesh position={[0, 0.56, 0]} castShadow={true} receiveShadow={true} raycast={() => null}>
+                  <coneGeometry args={[0.38, 0.58, 10]} />
+                  <meshStandardMaterial color="#166534" roughness={0.85} />
+                </mesh>
+                <mesh position={[0, 0.86, 0]} castShadow={true} receiveShadow={true} raycast={() => null}>
+                  <coneGeometry args={[0.28, 0.48, 10]} />
+                  <meshStandardMaterial color="#15803d" roughness={0.85} />
+                </mesh>
+              </>
+            ) : (
+              <>
+                <mesh position={[0, 0.62, 0]} castShadow={true} receiveShadow={true} raycast={() => null}>
+                  <sphereGeometry args={[0.34, 12, 12]} />
+                  <meshStandardMaterial color="#16a34a" roughness={0.82} />
+                </mesh>
+                <mesh position={[0.16, 0.54, 0.12]} castShadow={true} receiveShadow={true} raycast={() => null}>
+                  <sphereGeometry args={[0.24, 10, 10]} />
+                  <meshStandardMaterial color="#22c55e" roughness={0.82} />
+                </mesh>
+                <mesh position={[-0.15, 0.52, -0.1]} castShadow={true} receiveShadow={true} raycast={() => null}>
+                  <sphereGeometry args={[0.25, 10, 10]} />
+                  <meshStandardMaterial color="#15803d" roughness={0.82} />
+                </mesh>
+              </>
+            )}
+          </group>
+        ))}
+      </group>
+
+      {/* ================================================================= */}
+      {/* 6. SURROUNDING OUTER SKYLINE BUILDINGS                            */}
+      {/* ================================================================= */}
+      <group position={[0, FLOOR_Y, 0]}>
+        {outerBuildings.map((b, idx) => (
+          <group key={`outer-bldg-${idx}`} position={[b.x, b.h * 0.5, b.z]}>
+            <mesh castShadow={false} receiveShadow={true} raycast={() => null}>
+              <boxGeometry args={[b.w, b.h, b.d]} />
+              <meshStandardMaterial color={b.color} roughness={0.75} metalness={0.18} />
+              <Edges scale={1.0} threshold={15} color="#0f172a" />
+            </mesh>
+            {/* Horizontal Illuminated Glass Curtain Bands */}
+            {Array.from({ length: Math.floor(b.h * 1.2) }).map((_, fIdx) => {
+              const fy = -b.h * 0.4 + fIdx * 0.72;
+              if (fy > b.h * 0.42) return null;
+              return (
+                <mesh
+                  key={`band-${fIdx}`}
+                  position={[0, fy, 0]}
+                  raycast={() => null}
+                >
+                  <boxGeometry args={[b.w + 0.03, 0.14, b.d + 0.03]} />
+                  <meshStandardMaterial
+                    color={b.accent}
+                    emissive={b.accent}
+                    emissiveIntensity={0.18}
+                    roughness={0.25}
+                    metalness={0.6}
+                  />
+                </mesh>
+              );
+            })}
+            {/* Rooftop Mechanical Penthouse */}
+            <mesh position={[0, b.h * 0.5 + 0.22, 0]} raycast={() => null}>
+              <boxGeometry args={[b.w * 0.55, 0.44, b.d * 0.55]} />
+              <meshStandardMaterial color="#475569" roughness={0.8} />
+              <Edges scale={1.0} threshold={15} color="#1e293b" />
+            </mesh>
+          </group>
+        ))}
+      </group>
+    </group>
+  );
+}
+
+/**
+ * Urban Cityscape Stage with Asymmetric Neighboring Buildings, Irregular 3D Balconies with People,
+ * 7x5 Central Building Zone with Limited Buildable Concrete Pads & Restricted Courtyard Gardens,
+ * and 7x2 Foreground Staging Area (x: -3..3, z: 3..4).
  */
 interface DualShadowStageProps {
   windowCoordinates: Array<[number, number]>;
+  allowedFloorSet: Set<string>;
   blockedWindowSet: Set<string>;
   wallStencils: StencilElement[];
   floorStencils: StencilElement[];
@@ -1235,6 +2041,7 @@ interface DualShadowStageProps {
 
 function DualShadowStage({
   windowCoordinates,
+  allowedFloorSet,
   blockedWindowSet,
   spacing,
   hasSelectedBlock,
@@ -1244,7 +2051,7 @@ function DualShadowStage({
 }: DualShadowStageProps) {
   return (
     <group>
-      {/* Expansive Urban Plaza Receiver Plane */}
+      {/* Expansive Urban Ground Receiver Plane */}
       <mesh
         rotation={[-Math.PI / 2, 0, 0]}
         position={[0, FLOOR_Y - 0.04, 0]}
@@ -1252,51 +2059,51 @@ function DualShadowStage({
         castShadow={false}
         raycast={() => null}
       >
-        <planeGeometry args={[52, 52]} />
-        <meshStandardMaterial color="#e2e8f0" roughness={0.95} metalness={0.02} />
+        <planeGeometry args={[64, 64]} />
+        <meshStandardMaterial color="#cbd5e1" roughness={0.94} metalness={0.02} />
       </mesh>
 
       {/* ===================================================================== */}
-      {/* 1. TWO TALL NEIGHBORING BUILDINGS (Dark Slate Concrete) + BALCONIES   */}
+      {/* 1. ASYMMETRIC NEIGHBORING BUILDINGS (Dark Slate Concrete) + BALCONIES */}
       {/* ===================================================================== */}
       <group>
-        {/* West Neighboring Building (Covers X = -2, -1; Y = 0..4; front face at WALL_Z) */}
+        {/* West Residential Tower (Covers X = -3, -2, -1; front face at WALL_Z) */}
         <mesh
-          position={[-1.52 * spacing, 0.25 * spacing, WALL_Z - 0.85]}
+          position={[-2.05 * spacing, 0.35 * spacing, WALL_Z - 0.78]}
           receiveShadow={true}
           castShadow={false}
           raycast={() => null}
         >
-          <boxGeometry args={[2.35 * spacing, 6.2 * spacing, 1.7]} />
-          <meshStandardMaterial color="#273244" roughness={0.88} metalness={0.08} />
+          <boxGeometry args={[3.35 * spacing, 6.8 * spacing, 1.56]} />
+          <meshStandardMaterial color="#334155" roughness={0.86} metalness={0.08} />
           <Edges scale={1.0} threshold={15} color="#0f172a" />
         </mesh>
 
-        {/* East Neighboring Building (Covers X = 1, 2; Y = 0..4; front face at WALL_Z) */}
+        {/* Central Stepped Loft Building (Covers X = 0; front face at WALL_Z) */}
         <mesh
-          position={[1.52 * spacing, 0.25 * spacing, WALL_Z - 0.85]}
+          position={[0, 0.05 * spacing, WALL_Z - 0.82]}
           receiveShadow={true}
           castShadow={false}
           raycast={() => null}
         >
-          <boxGeometry args={[2.35 * spacing, 6.2 * spacing, 1.7]} />
-          <meshStandardMaterial color="#273244" roughness={0.88} metalness={0.08} />
+          <boxGeometry args={[1.18 * spacing, 6.1 * spacing, 1.64]} />
+          <meshStandardMaterial color="#273244" roughness={0.88} metalness={0.06} />
           <Edges scale={1.0} threshold={15} color="#0f172a" />
         </mesh>
 
-        {/* Central Skyway / Courtyard Backdrop Wall (Recessed dark slate concrete) */}
+        {/* East Terrace Tower (Covers X = 1, 2, 3; front face at WALL_Z) */}
         <mesh
-          position={[0, 0.25 * spacing, WALL_Z - 1.1]}
+          position={[2.05 * spacing, 0.25 * spacing, WALL_Z - 0.78]}
           receiveShadow={true}
           castShadow={false}
           raycast={() => null}
         >
-          <boxGeometry args={[1.15 * spacing, 6.2 * spacing, 1.2]} />
-          <meshStandardMaterial color="#1e2230" roughness={0.92} metalness={0.05} />
+          <boxGeometry args={[3.35 * spacing, 6.5 * spacing, 1.56]} />
+          <meshStandardMaterial color="#334155" roughness={0.86} metalness={0.08} />
           <Edges scale={1.0} threshold={15} color="#0f172a" />
         </mesh>
 
-        {/* 3D Balconies with Standing Residents (Happy in 60° Sun, Angry when in Shadow) */}
+        {/* Irregularly Arranged 3D Balconies with Multiple Standing Residents */}
         {windowCoordinates.map(([wx, wy]) => {
           const key = `${wx}-${wy}`;
           const isBlocked = blockedWindowSet.has(key);
@@ -1311,23 +2118,23 @@ function DualShadowStage({
           );
         })}
 
-        {/* Dynamic Shadow Overlay Receiver Plane across the Neighboring Building Facades */}
+        {/* Prominent Shadow Overlay Receiver Plane across the Neighboring Building Facades */}
         <mesh
           position={[0, 0.25 * spacing, WALL_Z + 0.015]}
           receiveShadow={true}
           castShadow={false}
           raycast={() => null}
         >
-          <planeGeometry args={[6.4 * spacing, 6.2 * spacing]} />
-          <shadowMaterial color="#090d16" transparent opacity={0.5} />
+          <planeGeometry args={[8.2 * spacing, 6.8 * spacing]} />
+          <shadowMaterial color="#020617" transparent opacity={0.76} />
         </mesh>
       </group>
 
       {/* ===================================================================== */}
-      {/* 2. CENTRAL BUILDING ZONE (5x5 Foundation Pad, z: -2..2)               */}
+      {/* 2. CENTRAL BUILDING ZONE (Limited Buildable Pads vs Courtyard Gardens)*/}
       {/* ===================================================================== */}
       <group position={[0, FLOOR_Y, 0]}>
-        {/* Central Building Zone Concrete Foundation Pad */}
+        {/* Central Building Zone Base Sub-Slab */}
         <mesh
           rotation={[-Math.PI / 2, 0, 0]}
           position={[0, 0, 0]}
@@ -1335,27 +2142,45 @@ function DualShadowStage({
           castShadow={false}
           raycast={() => null}
         >
-          <planeGeometry args={[5.5 * spacing, 5.5 * spacing]} />
-          <meshStandardMaterial color="#cbd5e1" roughness={0.88} metalness={0.05} />
+          <planeGeometry args={[7.45 * spacing, 5.45 * spacing]} />
+          <meshStandardMaterial color="#94a3b8" roughness={0.9} metalness={0.04} />
         </mesh>
 
-        {/* Interactive 5x5 Central Building Zone Grid Cells */}
+        {/* 7x5 Central Building Zone Cells: Buildable Concrete Pads vs Restricted Courtyard Gardens */}
         {GRID_COORDS.map((x) =>
-          GRID_COORDS.map((z) => {
+          GRID_Z_COORDS.map((z) => {
+            const isAllowedPad =
+              allowedFloorSet.size === 0 || allowedFloorSet.has(`${x},${z}`);
             const isHoveredCell =
               hoveredColumn !== null &&
               hoveredColumn[0] === x &&
               hoveredColumn[1] === z;
+
+            if (!isAllowedPad) {
+              return (
+                <CourtyardGardenCell
+                  key={`garden-cell-${x}-${z}`}
+                  x={x}
+                  z={z}
+                  spacing={spacing}
+                  isHoveredInvalid={isHoveredCell && hasSelectedBlock}
+                  onHover={onHoverColumn}
+                />
+              );
+            }
+
             return (
               <group
                 key={`floor-cell-${x}-${z}`}
                 position={[x * spacing, 0.006, z * spacing]}
+                scale={[spacing, 1, spacing]}
               >
+                {/* Raised Reinforced Concrete Foundation Pad */}
                 <mesh
                   rotation={[-Math.PI / 2, 0, 0]}
                   geometry={SHARED_CELL_GUIDE_GEO}
                   castShadow={false}
-                  receiveShadow={false}
+                  receiveShadow={true}
                   onClick={(e) => {
                     if (!hasSelectedBlock || e.delta > 10) return;
                     e.stopPropagation();
@@ -1378,15 +2203,15 @@ function DualShadowStage({
                         ? '#38bdf8'
                         : hasSelectedBlock
                         ? '#bae6fd'
-                        : '#cbd5e1'
+                        : '#e2e8f0'
                     }
                     transparent
                     opacity={
                       isHoveredCell && hasSelectedBlock
-                        ? 0.38
+                        ? 0.55
                         : hasSelectedBlock
-                        ? 0.14
-                        : 0.01
+                        ? 0.36
+                        : 0.92
                     }
                     depthWrite={false}
                   />
@@ -1402,15 +2227,15 @@ function DualShadowStage({
                         ? '#0284c7'
                         : hasSelectedBlock
                         ? '#0369a1'
-                        : '#64748b'
+                        : '#334155'
                     }
                     transparent
                     opacity={
                       isHoveredCell && hasSelectedBlock
-                        ? 0.95
+                        ? 1.0
                         : hasSelectedBlock
-                        ? 0.8
-                        : 0.65
+                        ? 0.9
+                        : 0.85
                     }
                   />
                 </lineSegments>
@@ -1429,7 +2254,7 @@ function DualShadowStage({
           castShadow={false}
           raycast={() => null}
         >
-          <planeGeometry args={[5.5 * spacing, 2.35 * spacing]} />
+          <planeGeometry args={[7.45 * spacing, 2.35 * spacing]} />
           <meshStandardMaterial color="#94a3b8" roughness={0.9} metalness={0.08} />
         </mesh>
 
@@ -1440,11 +2265,11 @@ function DualShadowStage({
           receiveShadow={false}
           raycast={() => null}
         >
-          <boxGeometry args={[5.52 * spacing, 0.02, 2.37 * spacing]} />
+          <boxGeometry args={[7.48 * spacing, 0.02, 2.37 * spacing]} />
           <meshBasicMaterial color="#eab308" wireframe />
         </mesh>
 
-        {/* Interactive Staging Area Cells (x: -2..2, z: 3..4) */}
+        {/* Interactive Staging Area Cells (x: -3..3, z: 3..4) */}
         {GRID_COORDS.map((x) =>
           STAGING_Z_COORDS.map((z) => {
             const isHoveredCell =
@@ -1455,6 +2280,7 @@ function DualShadowStage({
               <group
                 key={`staging-cell-${x}-${z}`}
                 position={[x * spacing, 0.008, z * spacing]}
+                scale={[spacing, 1, spacing]}
               >
                 <mesh
                   rotation={[-Math.PI / 2, 0, 0]}
@@ -1480,7 +2306,7 @@ function DualShadowStage({
                   <meshBasicMaterial
                     color={isHoveredCell ? '#fde047' : '#94a3b8'}
                     transparent
-                    opacity={isHoveredCell && hasSelectedBlock ? 0.32 : 0.01}
+                    opacity={isHoveredCell && hasSelectedBlock ? 0.34 : 0.01}
                     depthWrite={false}
                   />
                 </mesh>
@@ -1502,16 +2328,16 @@ function DualShadowStage({
           })
         )}
 
-        {/* Dynamic Shadow Overlay Receiver Plane on the Ground */}
+        {/* Prominent Shadow Overlay Receiver Plane on the Ground */}
         <mesh
           rotation={[-Math.PI / 2, 0, 0]}
-          position={[0, 0.018, 0.8 * spacing]}
+          position={[0, 0.018, 0.6 * spacing]}
           receiveShadow={true}
           castShadow={false}
           raycast={() => null}
         >
-          <planeGeometry args={[14.5, 12.5]} />
-          <shadowMaterial color="#0f172a" transparent opacity={0.48} />
+          <planeGeometry args={[16, 14]} />
+          <shadowMaterial color="#020617" transparent opacity={0.78} />
         </mesh>
       </group>
     </group>
@@ -1522,6 +2348,7 @@ export interface CubeClusterSceneProps {
   pieces: WallPiece[];
   blocks: BlockState[];
   windowCoordinates: Array<[number, number]>;
+  allowedFloorSet: Set<string>;
   blockedWindowSet: Set<string>;
   lastCraneTransfer: CraneTransferOp | null;
   selectedPieceId: string | null;
@@ -1541,6 +2368,7 @@ export interface CubeClusterSceneProps {
 export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
   pieces,
   windowCoordinates,
+  allowedFloorSet,
   blockedWindowSet,
   lastCraneTransfer,
   selectedPieceId,
@@ -1720,7 +2548,7 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
     });
   }, [selectedPiece, spacing, craneApi]);
 
-  // Calculate live ghost landing position & grid anchor when a block is selected
+  // Calculate live ghost landing position, validity on allowedFloorSet, & grid anchor when a block is selected
   const candidatePlacement = useMemo(() => {
     if (!selectedPiece) return null;
     const rawCol = hoveredColumn ?? [
@@ -1731,10 +2559,13 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
       GRID_MIN,
       Math.min(GRID_MAX - selectedPiece.dims[0] + 1, rawCol[0])
     );
-    const clampedZ = Math.max(
-      GRID_MIN,
-      Math.min(ALL_Z_MAX - selectedPiece.dims[2] + 1, rawCol[1])
-    );
+    const isTargetingStaging = rawCol[1] >= STAGING_Z_MIN;
+    const minZ = isTargetingStaging ? STAGING_Z_MIN : GRID_Z_MIN;
+    const maxZ = isTargetingStaging
+      ? ALL_Z_MAX - selectedPiece.dims[2] + 1
+      : GRID_Z_MAX - selectedPiece.dims[2] + 1;
+    const clampedZ = Math.max(minZ, Math.min(maxZ, rawCol[1]));
+
     const otherPieces = pieces.filter((p) => p.id !== selectedPiece.id);
     const settledOthers = settlePiecesWithGravity(otherPieces);
     const settledOtherBlocks = deriveBlocksFromPieces(settledOthers);
@@ -1747,16 +2578,31 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
     );
     const gridPos: [number, number, number] = [clampedX, dropY, clampedZ];
     const worldCenter = getPieceWorldCenter(gridPos, selectedPiece.dims, spacing);
+
+    const candidatePieces = pieces.map((p) =>
+      p.id === selectedPiece.id
+        ? { ...p, position: gridPos }
+        : settledOthers.find((s) => s.id === p.id) ?? p
+    );
+    const isValidPad = isValidPiecePosition(
+      candidatePieces,
+      selectedPiece.id,
+      gridPos,
+      selectedPiece.dims,
+      allowedFloorSet
+    );
+
     return {
       gridPos,
       worldCenter,
+      isValidPad,
       isHoveringNewColumn: hoveredColumn !== null,
     };
-  }, [selectedPiece, hoveredColumn, pieces, spacing]);
+  }, [selectedPiece, hoveredColumn, pieces, allowedFloorSet, spacing]);
 
-  // Compute projected floor shadow mesh grids for all placed blocks + pre-lock 60° ray trajectory preview
+  // Compute projected floor shadow mesh grids for all placed blocks + pre-lock 40° ray trajectory preview
   const projectedShadowData = useMemo(() => {
-    const cot60 = LIGHT_POSITION[2] / LIGHT_POSITION[1]; // cot(60°) ≈ 0.57735 (directed straight along -Z)
+    const cotSun = LIGHT_POSITION[2] / LIGHT_POSITION[1]; // cot(40°) ≈ 1.19175 (directed straight along -Z)
 
     const computePieceShadowFootprint = (
       pos: [number, number, number],
@@ -1776,19 +2622,19 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
       const deltaTopY = Math.max(0.1, topWorldY - FLOOR_Y);
       const deltaBottomY = Math.max(0, bottomWorldY - FLOOR_Y);
 
-      // 60-degree shadow projection straight towards the Neighboring Buildings (-Z)
-      const rawTipZ = minWorldZ - deltaTopY * cot60;
-      const rawStartZ = maxWorldZ - deltaBottomY * cot60;
+      // 40-degree shadow projection straight towards the Neighboring Buildings (-Z)
+      const rawTipZ = minWorldZ - deltaTopY * cotSun;
+      const rawStartZ = maxWorldZ - deltaBottomY * cotSun;
 
       const clampedTipZ = Math.max(WALL_Z + 0.04, rawTipZ);
       const clampedStartZ = Math.max(clampedTipZ + 0.16, rawStartZ);
 
       const centerX = (minWorldX + maxWorldX) * 0.5;
-      const widthX = Math.max(0.2, maxWorldX - minWorldX);
+      const widthX = Math.max(0.18, maxWorldX - minWorldX);
       const centerZ = (clampedTipZ + clampedStartZ) * 0.5;
-      const depthZ = Math.max(0.2, clampedStartZ - clampedTipZ);
+      const depthZ = Math.max(0.18, clampedStartZ - clampedTipZ);
 
-      // Check if this piece alone shades any Neighboring Building balcony resident under the 60° Sun
+      // Check if this piece alone shades any Neighboring Building balcony resident under the 40° Sun
       const pieceBlocks = deriveBlocksFromPieces([
         {
           id: pieceId,
@@ -1802,7 +2648,7 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
           wallSilhouette: 'rect',
           floorSilhouette: 'rect',
         },
-      ]).filter((b) => b.z >= GRID_MIN && b.z <= GRID_MAX);
+      ]).filter((b) => b.z >= GRID_Z_MIN && b.z <= GRID_Z_MAX);
 
       const shadedBalconies: Array<[number, number]> = [];
       for (const [wx, wy] of windowCoordinates) {
@@ -1811,31 +2657,31 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
         }
       }
 
-      // Build 60-degree solar ray trajectory line segments from the block's top-back & top-front corners to the floor shadow
+      // Build 40-degree solar ray trajectory line segments from the block's top corners to the floor shadow
       const rayEndY =
         rawTipZ < WALL_Z + 0.04
           ? Math.max(
               FLOOR_Y,
-              topWorldY - (minWorldZ - (WALL_Z + 0.04)) / cot60
+              topWorldY - (minWorldZ - (WALL_Z + 0.04)) / cotSun
             )
           : FLOOR_Y + 0.02;
 
       const rayPositions = new Float32Array([
-        // Left top-back ray (60° angle to shadow tip)
+        // Left top-back ray (40° angle to shadow tip)
         minWorldX,
         topWorldY,
         minWorldZ,
         minWorldX,
         rayEndY,
         clampedTipZ,
-        // Right top-back ray (60° angle to shadow tip)
+        // Right top-back ray (40° angle to shadow tip)
         maxWorldX,
         topWorldY,
         minWorldZ,
         maxWorldX,
         rayEndY,
         clampedTipZ,
-        // Center 60° trajectory spine
+        // Center 40° trajectory spine
         centerX,
         topWorldY,
         minWorldZ,
@@ -1848,13 +2694,13 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
         maxWorldZ,
         minWorldX,
         FLOOR_Y + 0.02,
-        Math.max(WALL_Z + 0.06, maxWorldZ - deltaTopY * cot60),
+        Math.max(WALL_Z + 0.06, maxWorldZ - deltaTopY * cotSun),
         maxWorldX,
         topWorldY,
         maxWorldZ,
         maxWorldX,
         FLOOR_Y + 0.02,
-        Math.max(WALL_Z + 0.06, maxWorldZ - deltaTopY * cot60),
+        Math.max(WALL_Z + 0.06, maxWorldZ - deltaTopY * cotSun),
       ]);
       const rayGeo = new THREE.BufferGeometry();
       rayGeo.setAttribute('position', new THREE.BufferAttribute(rayPositions, 3));
@@ -1911,14 +2757,14 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
   }, [hoveredPieceId, selectedPieceId, hoveredColumn]);
 
   return (
-    <div className="relative w-full h-full bg-[#e2e8f0] touch-none">
+    <div className="relative w-full h-full bg-[#bae6fd] touch-none">
       <Canvas
         shadows
         orthographic
         dpr={isSoftwareGl ? 1 : [1, 2]}
         camera={{
-          position: [13, 12, 14],
-          zoom: 36,
+          position: [12, 10.5, 13],
+          zoom: 60,
           near: 0.1,
           far: 1000,
         }}
@@ -1930,57 +2776,39 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
         onCreated={({ gl, scene }) => {
           gl.outputColorSpace = THREE.SRGBColorSpace;
           gl.toneMapping = THREE.ACESFilmicToneMapping;
-          gl.toneMappingExposure = 1.05;
+          gl.toneMappingExposure = 1.08;
           gl.shadowMap.enabled = true;
           gl.shadowMap.type = THREE.PCFSoftShadowMap;
-          scene.background = new THREE.Color('#e2e8f0');
-          scene.fog = new THREE.FogExp2('#e2e8f0', 0.006);
+          scene.background = new THREE.Color('#bae6fd');
+          scene.fog = new THREE.FogExp2('#bae6fd', 0.0045);
         }}
       >
-        <color attach="background" args={['#e2e8f0']} />
-        <SoftShadows size={20} samples={16} focus={0.6} />
+        <color attach="background" args={['#bae6fd']} />
+        <SoftShadows size={12} samples={16} focus={0.85} />
         <StudioEnvironment />
 
-        {/* Urban Daylight Ambient & Sky/Ground Hemisphere Fill (Non-shadow-casting) */}
-        <ambientLight intensity={0.78} color="#f8fafc" />
+        {/* High-Contrast Architectural Daylight (Lower ambient so the 40° Sun shadow is bold and prominent) */}
+        <ambientLight intensity={0.48} color="#f8fafc" />
         <hemisphereLight
-          args={['#f0f9ff', '#cbd5e1', 0.68]}
+          args={['#e0f2fe', '#cbd5e1', 0.48]}
           position={[0, 20, 0]}
         />
 
-        {/* SINGLE SHADOW-CASTING SUN AT TOP-BACK (60-DEGREE ANGLE DIRECTED TOWARDS NEIGHBORING BUILDINGS) */}
+        {/* SINGLE SHADOW-CASTING SUN AT TOP-BACK AT A 40-DEGREE ANGLE (NO VISIBLE SUN ORB IN SCENE) */}
         <directionalLight
           position={LIGHT_POSITION}
-          intensity={1.65}
+          intensity={2.35}
           color="#fffbeb"
           castShadow
           shadow-mapSize={[2048, 2048]}
-          shadow-camera-left={-10}
-          shadow-camera-right={10}
-          shadow-camera-top={10}
-          shadow-camera-bottom={-10}
+          shadow-camera-left={-11}
+          shadow-camera-right={11}
+          shadow-camera-top={11}
+          shadow-camera-bottom={-11}
           shadow-camera-near={1}
           shadow-camera-far={45}
           shadow-bias={-0.0005}
         />
-
-        {/* Visible Glowing 3D Sun Disc in the Sky Along the Top-Back 60-Degree Solar Direction */}
-        <group
-          position={[
-            LIGHT_POSITION[0] * 0.42,
-            LIGHT_POSITION[1] * 0.42,
-            LIGHT_POSITION[2] * 0.42,
-          ]}
-        >
-          <mesh castShadow={false} receiveShadow={false} raycast={() => null}>
-            <sphereGeometry args={[0.62, 24, 24]} />
-            <meshBasicMaterial color="#fde047" />
-          </mesh>
-          <mesh castShadow={false} receiveShadow={false} raycast={() => null}>
-            <sphereGeometry args={[0.88, 24, 24]} />
-            <meshBasicMaterial color="#fef08a" transparent opacity={0.32} />
-          </mesh>
-        </group>
 
         {/* OrbitControls for full 360-degree isometric rotation & touch gestures */}
         <OrbitControls
@@ -1991,9 +2819,9 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
           rotateSpeed={0.85}
           zoomSpeed={0.95}
           enablePan={false}
-          minZoom={14}
-          maxZoom={140}
-          target={[0, 0.3, 0.3]}
+          minZoom={18}
+          maxZoom={150}
+          target={[0, 0.1, 0.2]}
         />
 
         <CameraController
@@ -2002,9 +2830,13 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
           controlsRef={controlsRef}
         />
 
-        {/* Neighboring Buildings with 3D Balconies & Standing People, Central Pad & Staging Area */}
+        {/* Realistic Surrounding Environment: Gardens, Parks, Outer Buildings, Roads, Cars, Sky, Clouds & Birds */}
+        <RealisticCityEnvironment />
+
+        {/* Neighboring Buildings with Irregular 3D Balconies & Standing People, Limited Concrete Pads & Staging Area */}
         <DualShadowStage
           windowCoordinates={windowCoordinates}
+          allowedFloorSet={allowedFloorSet}
           blockedWindowSet={blockedWindowSet}
           wallStencils={wallStencils}
           floorStencils={floorStencils}
@@ -2019,12 +2851,11 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
         />
 
         {/* =========================================================================== */}
-        {/* SUBTLE FLOOR 'TARGET ZONES' (PROJECTED MESH GRIDS) & 60° RAY TRAJECTORIES   */}
+        {/* SUBTLE FLOOR 'TARGET ZONES' (PROJECTED MESH GRIDS) & 40° RAY TRAJECTORIES   */}
         {/* =========================================================================== */}
         <group>
           {/* 1. Balcony Shadow Apron Target-Zone Mesh Grids on the Floor (z = BALCONY_GRID_Z) */}
           {GRID_COORDS.map((x) => {
-            const isCentralSafeCorridor = x === 0;
             const hasBlockedBalconyInCol = Array.from(blockedWindowSet).some(
               (key) => Number(key.split('-')[0]) === x
             );
@@ -2042,21 +2873,9 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
                   raycast={() => null}
                 >
                   <meshBasicMaterial
-                    color={
-                      isCentralSafeCorridor
-                        ? '#10b981'
-                        : hasBlockedBalconyInCol
-                        ? '#ef4444'
-                        : '#f59e0b'
-                    }
+                    color={hasBlockedBalconyInCol ? '#ef4444' : '#f59e0b'}
                     transparent
-                    opacity={
-                      isCentralSafeCorridor
-                        ? 0.12
-                        : hasBlockedBalconyInCol
-                        ? 0.22
-                        : 0.1
-                    }
+                    opacity={hasBlockedBalconyInCol ? 0.26 : 0.12}
                     depthWrite={false}
                   />
                 </mesh>
@@ -2065,25 +2884,22 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
                   raycast={() => null}
                 >
                   <lineBasicMaterial
-                    color={
-                      isCentralSafeCorridor
-                        ? '#059669'
-                        : hasBlockedBalconyInCol
-                        ? '#dc2626'
-                        : '#d97706'
-                    }
+                    color={hasBlockedBalconyInCol ? '#dc2626' : '#d97706'}
                     transparent
-                    opacity={hasBlockedBalconyInCol ? 0.75 : 0.42}
+                    opacity={hasBlockedBalconyInCol ? 0.8 : 0.45}
                   />
                 </lineSegments>
               </group>
             );
           })}
 
-          {/* 2. Subtle Floor Target-Zone Sub-Grids across the 5x5 Central Building Zone */}
+          {/* 2. Subtle Floor Target-Zone Sub-Grids on Allowed Buildable Cells */}
           {GRID_COORDS.map((x) =>
-            GRID_COORDS.map((z) => {
-              const isSafeCorridor = x === 0 || z >= 0;
+            GRID_Z_COORDS.map((z) => {
+              if (allowedFloorSet.size > 0 && !allowedFloorSet.has(`${x},${z}`)) {
+                return null;
+              }
+              const isForwardSafeZone = z >= 1;
               return (
                 <lineSegments
                   key={`floor-subgrid-${x}-${z}`}
@@ -2093,16 +2909,16 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
                   raycast={() => null}
                 >
                   <lineBasicMaterial
-                    color={isSafeCorridor ? '#0284c7' : '#64748b'}
+                    color={isForwardSafeZone ? '#0284c7' : '#64748b'}
                     transparent
-                    opacity={isSafeCorridor ? 0.22 : 0.16}
+                    opacity={isForwardSafeZone ? 0.28 : 0.18}
                   />
                 </lineSegments>
               );
             })
           )}
 
-          {/* 3. Live Projected Shadow Mesh Grids on the Floor for Every Placed Block */}
+          {/* 3. Prominent Projected Shadow Mesh Grids on the Floor for Every Placed Block */}
           {projectedShadowData.activePieceShadows.map((item) => {
             const isSelectedBlock = item.pieceId === selectedPieceId;
             return (
@@ -2124,10 +2940,10 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
                       transparent
                       opacity={
                         item.shadesBalcony
-                          ? 0.24
+                          ? 0.28
                           : isSelectedBlock
-                          ? 0.2
-                          : 0.12
+                          ? 0.22
+                          : 0.15
                       }
                       depthWrite={false}
                     />
@@ -2141,26 +2957,26 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
                       transparent
                       opacity={
                         item.shadesBalcony
-                          ? 0.82
+                          ? 0.88
                           : isSelectedBlock
-                          ? 0.72
-                          : 0.48
+                          ? 0.78
+                          : 0.55
                       }
                     />
                   </lineSegments>
                 </group>
 
-                {/* Subtle 60° Solar Ray Trajectory Lines for Placed Blocks */}
+                {/* Subtle 40° Solar Ray Trajectory Lines for Placed Blocks */}
                 <lineSegments geometry={item.rayGeo} raycast={() => null}>
                   <lineBasicMaterial
                     color={item.shadesBalcony ? '#ef4444' : '#38bdf8'}
                     transparent
                     opacity={
                       item.shadesBalcony
-                        ? 0.55
+                        ? 0.62
                         : isSelectedBlock
-                        ? 0.5
-                        : 0.22
+                        ? 0.55
+                        : 0.26
                     }
                   />
                 </lineSegments>
@@ -2168,7 +2984,7 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
             );
           })}
 
-          {/* 4. Pre-Lock 60° Ray Trajectory & Projected Floor Shadow Target-Zone Preview (Before Locking Block in Place) */}
+          {/* 4. Pre-Lock 40° Ray Trajectory & Projected Floor Shadow Target-Zone Preview */}
           {selectedPiece &&
             candidatePlacement &&
             projectedShadowData.previewShadow && (
@@ -2195,6 +3011,7 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
                   >
                     <meshBasicMaterial
                       color={
+                        !candidatePlacement.isValidPad ||
                         projectedShadowData.previewShadow.shadesBalcony
                           ? '#ef4444'
                           : '#10b981'
@@ -2210,6 +3027,7 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
                   >
                     <lineBasicMaterial
                       color={
+                        !candidatePlacement.isValidPad ||
                         projectedShadowData.previewShadow.shadesBalcony
                           ? '#b91c1c'
                           : '#047857'
@@ -2220,13 +3038,14 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
                   </lineSegments>
                 </group>
 
-                {/* 60-Degree Ray Trajectory Guide Lines from Candidate Block to Floor Target Zone */}
+                {/* 40-Degree Ray Trajectory Guide Lines from Candidate Block to Floor Target Zone */}
                 <lineSegments
                   geometry={projectedShadowData.previewShadow.rayGeo}
                   raycast={() => null}
                 >
                   <lineBasicMaterial
                     color={
+                      !candidatePlacement.isValidPad ||
                       projectedShadowData.previewShadow.shadesBalcony
                         ? '#ef4444'
                         : '#10b981'
@@ -2260,18 +3079,20 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
               <boxGeometry args={[0.96, 0.96, 0.96]} />
               <meshBasicMaterial
                 color={
+                  !candidatePlacement.isValidPad ||
                   projectedShadowData.previewShadow?.shadesBalcony
                     ? '#ef4444'
                     : '#10b981'
                 }
                 transparent
-                opacity={0.22}
+                opacity={0.26}
                 depthWrite={false}
               />
               <Edges
                 scale={1.0}
                 threshold={15}
                 color={
+                  !candidatePlacement.isValidPad ||
                   projectedShadowData.previewShadow?.shadesBalcony
                     ? '#dc2626'
                     : '#059669'
@@ -2315,3 +3136,4 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
     </div>
   );
 };
+

@@ -21,9 +21,13 @@ export interface WallPiece {
   id: string;
   name: string;
   shape: ShapeKind;
-  /** Dimensions in grid units [widthX, heightY, depthZ] */
+  /** Dimensions in grid units [widthX, heightY, depthZ] for current orientation */
   dims: [number, number, number];
-  /** Current integer anchor position [x, y, z] in the 3D wall workspace (-2..2) */
+  /** Unrotated original dimensions [w0, h0, d0] for 3D geometry rendering */
+  baseDims?: [number, number, number];
+  /** 3D Euler rotation [rx, ry, rz] in radians around X, Y, Z axes */
+  rotation?: [number, number, number];
+  /** Current integer anchor position [x, y, z] in the 3D wall workspace (-3..3) */
   position: [number, number, number];
   /** Unique solution target position [targetX, targetY, targetZ] */
   targetPosition: [number, number, number];
@@ -129,7 +133,7 @@ export interface WinCheckResult {
   floorCellsMatched: number;
   /** Number of current floor cells spilling outside targetFloorShape */
   floorSpilloverCount: number;
-  /** 5x5 occupancy grid on the Neighboring Buildings Wall (XY, coords -2..+2) */
+  /** 7x7 occupancy grid on the Neighboring Buildings Wall (XY) */
   wallGrid: Array<
     Array<{
       target: boolean;
@@ -139,7 +143,7 @@ export interface WinCheckResult {
       profile?: SilhouetteProfile;
     }>
   >;
-  /** 5x5 occupancy grid on the Central Building Zone Ground (XZ, coords -2..+2) */
+  /** 7x7 occupancy grid on the Central Building Zone Ground (XZ) */
   floorGrid: Array<Array<{ target: boolean; current: boolean; profile?: SilhouetteProfile }>>;
   wallStencils: StencilElement[];
   floorStencils: StencilElement[];
@@ -150,24 +154,32 @@ export interface PuzzleLevel {
   number: string;
   title: string;
   subtitle: string;
-  /** X and Y coordinates of Balconies with residents on the Neighboring Buildings (-2..2, 0..4) */
+  /** X and Y coordinates of Balconies with residents on the Neighboring Buildings (-3..3, 0..4) */
   windowCoordinates: Array<[number, number]>;
+  /** Limited buildable (x, z) floor coordinates inside the Central Building Zone (-3..3, -2..2). Non-listed cells are restricted courtyard gardens. */
+  allowedFloorCells: Array<[number, number]>;
   pieces: Omit<WallPiece, 'position'>[];
 }
 
 /**
- * Single Sun Light Position at the top-back at a 60-degree elevation angle from the ground,
- * centered at X = 0 so shadows are directed straight towards the Neighboring Buildings (-Z):
- * Horizontal distance = 10; Vertical height = 10 * tan(60°) ≈ 17.32
+ * Single Sun Light Position at the top-back at a 40-degree elevation angle from the ground,
+ * centered at X = 0 so prominent shadows are directed straight towards the Neighboring Buildings (-Z):
+ * Horizontal distance = 12; Vertical height = 12 * tan(40°) ≈ 10.07
  */
-export const LIGHT_POSITION: [number, number, number] = [0, 17.32, 10];
+export const LIGHT_POSITION: [number, number, number] = [0, 10.07, 12];
 
 /** Grid Z coordinate of the protruding Neighboring Building balconies (just behind row z = -2) */
 export const BALCONY_GRID_Z = -2.65;
 
-export const GRID_MIN = -2;
-export const GRID_MAX = 2;
-export const GRID_COORDS = [-2, -1, 0, 1, 2] as const;
+/** 7-Column X Grid (-3..+3) for smaller, denser modular skyscraper blocks */
+export const GRID_MIN = -3;
+export const GRID_MAX = 3;
+export const GRID_COORDS = [-3, -2, -1, 0, 1, 2, 3] as const;
+
+/** Central Building Zone Z Grid (-2..+2) */
+export const GRID_Z_MIN = -2;
+export const GRID_Z_MAX = 2;
+export const GRID_Z_COORDS = [-2, -1, 0, 1, 2] as const;
 
 /** Foreground Staging Area Z coordinates where unplaced skyscraper blocks sit */
 export const STAGING_Z_MIN = 3;
@@ -176,34 +188,149 @@ export const STAGING_Z_COORDS = [3, 4] as const;
 export const ALL_Z_MAX = 4;
 
 export const GRID_Y_MIN = 0;
-export const GRID_Y_MAX = 4;
-export const GRID_Y_COORDS = [0, 1, 2, 3, 4] as const;
+export const GRID_Y_MAX = 5;
+export const GRID_Y_COORDS = [0, 1, 2, 3, 4, 5] as const;
 
 /**
- * Returns true if the piece is completely inside the 5x5 Central Building Zone
- * (x in [-2..2] and z in [-2..2]), i.e. not sitting in the foreground Staging Area (z >= 3).
+ * Rotates a piece 90 degrees around the world X, Y, or Z axis:
+ * - Swaps grid dimensions `[w, h, d]`:
+ *   - X-axis: `[w, d, h]`
+ *   - Y-axis: `[d, h, w]`
+ *   - Z-axis: `[h, w, d]`
+ * - Updates the 3D Euler rotation `[rx, ry, rz]` (intrinsic XYZ order) via exact 3x3 orthogonal matrix pre-multiplication
+ *   so chained X, Y, and Z rotations always align with the world grid without gimbal lock.
+ */
+export function rotatePieceByAxis(
+  currentDims: [number, number, number],
+  currentRotation: [number, number, number] = [0, 0, 0],
+  axis: 'x' | 'y' | 'z'
+): { dims: [number, number, number]; rotation: [number, number, number] } {
+  const [w, h, d] = currentDims;
+  const nextDims: [number, number, number] =
+    axis === 'x'
+      ? [w, d, h]
+      : axis === 'y'
+      ? [d, h, w]
+      : [h, w, d];
+
+  const [rx, ry, rz] = currentRotation;
+  const cx = Math.cos(rx), sx = Math.sin(rx);
+  const cy = Math.cos(ry), sy = Math.sin(ry);
+  const cz = Math.cos(rz), sz = Math.sin(rz);
+
+  // Current rotation matrix M = Rx(rx) * Ry(ry) * Rz(rz) (Three.js 'XYZ' Euler order)
+  const m00 = cy * cz;
+  const m01 = -cy * sz;
+  const m02 = sy;
+  const m10 = sx * sy * cz + cx * sz;
+  const m11 = -sx * sy * sz + cx * cz;
+  const m12 = -sx * cy;
+  const m20 = -cx * sy * cz + sx * sz;
+  const m21 = cx * sy * sz + sx * cz;
+  const m22 = cx * cy;
+
+  // Pre-multiply by 90-degree world rotation around `axis`: R_next = R_axis(pi/2) * M
+  let n00 = m00, n01 = m01, n02 = m02;
+  let n10 = m10, n11 = m11, n12 = m12;
+  let n20 = m20, n21 = m21, n22 = m22;
+
+  if (axis === 'x') {
+    // Rx(90°): row0 = row0, row1 = -row2, row2 = row1
+    n10 = -m20; n11 = -m21; n12 = -m22;
+    n20 = m10;  n21 = m11;  n22 = m12;
+  } else if (axis === 'y') {
+    // Ry(90°): row0 = row2, row1 = row1, row2 = -row0
+    n00 = m20;  n01 = m21;  n02 = m22;
+    n20 = -m00; n21 = -m01; n22 = -m02;
+  } else {
+    // Rz(90°): row0 = -row1, row1 = row0, row2 = row2
+    n00 = -m10; n01 = -m11; n02 = -m12;
+    n10 = m00;  n11 = m01;  n12 = m02;
+  }
+
+  // Extract Three.js 'XYZ' Euler angles from R_next
+  const clamp = (v: number) => Math.max(-1, Math.min(1, v));
+  const nextRy = Math.asin(clamp(n02));
+  let nextRx = 0;
+  let nextRz = 0;
+  if (Math.abs(n02) < 0.9999) {
+    nextRx = Math.atan2(-n12, n22);
+    nextRz = Math.atan2(-n01, n00);
+  } else {
+    nextRx = Math.atan2(n21, n11);
+    nextRz = 0;
+  }
+
+  // Snap to clean multiples of pi/2 to avoid floating-point drift
+  const snapQuarter = (rad: number) => {
+    const q = Math.round(rad / (Math.PI / 2)) * (Math.PI / 2);
+    return Math.abs(q) < 1e-6 ? 0 : q;
+  };
+
+  return {
+    dims: nextDims,
+    rotation: [snapQuarter(nextRx), snapQuarter(nextRy), snapQuarter(nextRz)],
+  };
+}
+
+/**
+ * Deterministic irregular offset [offX, offY, offZ] in grid units for a balcony at [wx, wy]
+ * so balconies are arranged in an organic, non-regular staggered architectural pattern.
+ */
+export function getBalconyOffset(
+  wx: number,
+  wy: number
+): [number, number, number] {
+  const s1 = Math.sin(wx * 12.9898 + wy * 78.233) * 43758.5453;
+  const fx = s1 - Math.floor(s1);
+  const s2 = Math.sin(wx * 39.346 + wy * 11.135) * 23421.631;
+  const fy = s2 - Math.floor(s2);
+  const s3 = Math.sin(wx * 73.156 + wy * 52.719) * 19283.412;
+  const fz = s3 - Math.floor(s3);
+
+  const offX = (fx - 0.5) * 0.28;
+  const offY = (fy - 0.5) * 0.26;
+  const offZ = (fz - 0.5) * 0.1;
+  return [offX, offY, offZ];
+}
+
+/**
+ * Returns true if the piece is completely inside the Central Building Zone
+ * (x in [-3..3] and z in [-2..2]) and all of its occupied floor cells belong to `allowedFloorSet` (if provided).
  */
 export function isPieceInCentralZone(
-  piece: Pick<WallPiece, 'position' | 'dims'>
+  piece: Pick<WallPiece, 'position' | 'dims'>,
+  allowedFloorSet?: Set<string>
 ): boolean {
   const [x, , z] = piece.position;
   const [w, , d] = piece.dims;
-  return (
+  const insideBounds =
     x >= GRID_MIN &&
     x + w - 1 <= GRID_MAX &&
-    z >= GRID_MIN &&
-    z + d - 1 <= GRID_MAX
-  );
+    z >= GRID_Z_MIN &&
+    z + d - 1 <= GRID_Z_MAX;
+  if (!insideBounds) return false;
+
+  if (allowedFloorSet && allowedFloorSet.size > 0) {
+    for (let dx = 0; dx < w; dx++) {
+      for (let dz = 0; dz < d; dz++) {
+        if (!allowedFloorSet.has(`${x + dx},${z + dz}`)) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
 }
 
 /**
  * Computes the world center offset of a piece given its integer anchor [x, y, z] and dimensions [w, h, d].
- * X & Z use [-2..+2]; Y uses [0..4] where y = 0 rests directly on the floor plane (world Y = -2 * spacing).
+ * X uses [-3..+3], Z uses [-2..+4], and Y uses [0..5] where y = 0 rests directly on the floor plane.
  */
 export function getPieceWorldCenter(
   pos: [number, number, number],
   dims: [number, number, number],
-  spacing = 1.0
+  spacing = 0.82
 ): [number, number, number] {
   return [
     (pos[0] + (dims[0] - 1) * 0.5) * spacing,
@@ -365,10 +492,9 @@ export function getTargetFloorShape(
 /**
  * Phase 12: Angled Vector Projection Algorithm
  * Iterates through the `blocks` array and calculates each visible block's shadow floor
- * coordinates (`y = 0`) under the 60-degree directional sun light at `[lightX, lightY, lightZ]`:
+ * coordinates (`y = 0`) under the 40-degree directional sun light at `[lightX, lightY, lightZ]`:
  *   shadowX = x - (lightX / lightY) * (y + 1)
  *   shadowZ = z - (lightZ / lightY) * (y + 1)
- * Note: Since a block at y=0 has height 1 unit above the floor, `(y + 1)` projects its top shadow edge onto the floor.
  */
 export function projectAngledShadow(
   blocks: BlockState[],
@@ -424,24 +550,46 @@ export function getTargetShadow(
 
 /**
  * Checks if placing `movingPieceId` at `candidatePos` stays within the construction site
- * (X: -2..2, Y: 0..4, Z: -2..4 including the Central Building Zone [-2..2] and Staging Area [3..4])
+ * (X: -3..3, Y: 0..5, Z: -2..4 including the Central Building Zone [-2..2] and Staging Area [3..4]),
+ * respects `allowedFloorSet` for any cell inside the Central Building Zone (z <= 2),
  * and does not collide with any other piece.
  */
 export function isValidPiecePosition(
   pieces: WallPiece[],
   movingPieceId: string,
   candidatePos: [number, number, number],
-  dims: [number, number, number]
+  dims: [number, number, number],
+  allowedFloorSet?: Set<string>
 ): boolean {
   if (
     candidatePos[0] < GRID_MIN ||
     candidatePos[0] + dims[0] - 1 > GRID_MAX ||
     candidatePos[1] < GRID_Y_MIN ||
     candidatePos[1] + dims[1] - 1 > GRID_Y_MAX ||
-    candidatePos[2] < GRID_MIN ||
+    candidatePos[2] < GRID_Z_MIN ||
     candidatePos[2] + dims[2] - 1 > ALL_Z_MAX
   ) {
     return false;
+  }
+
+  // Enforce limited buildable floor spaces inside the Central Building Zone (z in -2..2).
+  // Also prevent a single block from straddling across the Central Zone (z <= 2) and Staging Area (z >= 3).
+  const minZ = candidatePos[2];
+  const maxZ = candidatePos[2] + dims[2] - 1;
+  if (minZ <= GRID_Z_MAX && maxZ > GRID_Z_MAX) {
+    return false;
+  }
+
+  if (allowedFloorSet && allowedFloorSet.size > 0 && maxZ <= GRID_Z_MAX) {
+    for (let dx = 0; dx < dims[0]; dx++) {
+      for (let dz = 0; dz < dims[2]; dz++) {
+        const cx = candidatePos[0] + dx;
+        const cz = candidatePos[2] + dz;
+        if (!allowedFloorSet.has(`${cx},${cz}`)) {
+          return false;
+        }
+      }
+    }
   }
 
   const candidateCells = getOccupiedCells(candidatePos, dims);
@@ -462,10 +610,9 @@ export function isValidPiecePosition(
 }
 
 /**
- * Checks if a Neighboring Building balcony at `[wx, wy]` (with resident standing at `[wx, wy, BALCONY_GRID_Z]`)
- * is cast into shadow by any block in `centralZoneBlocks` under the single 60-degree Sun at `lightPosition`.
- * Uses 3D ray-box (AABB slab) intersection from key points on the balcony resident along the Sun direction vector
- * `[lightX, lightY, lightZ]`, matching the Three.js directionalLight shadow map.
+ * Checks if a Neighboring Building balcony at `[wx, wy]` (with irregular staggered offset `getBalconyOffset(wx, wy)`
+ * and multiple residents standing on the terrace) is cast into shadow by any block in `centralZoneBlocks`
+ * under the single 40-degree Sun at `lightPosition`.
  */
 export function isBalconyShadedByBlocks(
   wx: number,
@@ -474,13 +621,18 @@ export function isBalconyShadedByBlocks(
   lightPosition: [number, number, number] = LIGHT_POSITION
 ): boolean {
   const [lx, ly, lz] = lightPosition;
-  // Sample points across the balcony resident (feet, torso, head) at z = BALCONY_GRID_Z
+  const [offX, offY, offZ] = getBalconyOffset(wx, wy);
+  const bx = wx + offX;
+  const by = wy + offY;
+  const bz = BALCONY_GRID_Z + offZ;
+
+  // Sample points across the balcony residents (left person, center, right person, torso & head)
   const samplePoints: Array<[number, number, number]> = [
-    [wx, wy, BALCONY_GRID_Z],
-    [wx, wy + 0.22, BALCONY_GRID_Z - 0.08],
-    [wx, wy - 0.18, BALCONY_GRID_Z + 0.08],
-    [wx - 0.16, wy, BALCONY_GRID_Z],
-    [wx + 0.16, wy, BALCONY_GRID_Z],
+    [bx, by, bz],
+    [bx - 0.22, by, bz],
+    [bx + 0.22, by, bz],
+    [bx, by + 0.22, bz - 0.06],
+    [bx, by - 0.16, bz + 0.06],
   ];
 
   const slabAxis = (
@@ -500,13 +652,12 @@ export function isBalconyShadedByBlocks(
 
   for (const block of centralZoneBlocks) {
     if (!block.visible) continue;
-    // Block AABB in grid coordinates (each unit block spans [x - 0.52, x + 0.52])
-    const minX = block.x - 0.52;
-    const maxX = block.x + 0.52;
-    const minY = block.y - 0.52;
-    const maxY = block.y + 0.52;
-    const minZ = block.z - 0.52;
-    const maxZ = block.z + 0.52;
+    const minX = block.x - 0.51;
+    const maxX = block.x + 0.51;
+    const minY = block.y - 0.51;
+    const maxY = block.y + 0.51;
+    const minZ = block.z - 0.51;
+    const maxZ = block.z + 0.51;
 
     for (const [px, py, pz] of samplePoints) {
       const sx = slabAxis(minX, maxX, px, lx);
@@ -529,22 +680,19 @@ export function isBalconyShadedByBlocks(
 }
 
 /**
- * Phase 16: "Right to Light" Analytical Validator & Single 60° Sun Balcony Shadow Evaluator
- * 1. Traces the 60-degree Sun ray from each Neighboring Building balcony (`windowCoordinates`)
- *    through the 3D blocks in the Central Building Zone to check if any balcony resident is in shadow.
- * 2. Tracks how many blocks are still in the Staging Area (`z >= 3`) vs placed in the Central Building Zone (`z <= 2`).
- * 3. Win State: `allBlocksPlaced` (0 blocks in Staging Area) AND `blockedWindowSet.size === 0` (0 angry shaded balconies).
+ * Phase 16: "Right to Light" Analytical Validator & Single 40° Sun Balcony Shadow Evaluator
  */
 export function checkWinCondition(
   pieces: WallPiece[],
-  windowCoordinates: Array<[number, number]> = []
+  windowCoordinates: Array<[number, number]> = [],
+  allowedFloorSet?: Set<string>
 ): WinCheckResult {
   const blocks = deriveBlocksFromPieces(pieces);
   const visibleBlocks = blocks.filter((b) => b.visible === true);
 
   // Blocks placed inside the Central Building Zone (z in -2..2) can cast shadows onto the Neighboring Building balconies
   const centralZoneBlocks = visibleBlocks.filter(
-    (b) => b.z >= GRID_MIN && b.z <= GRID_MAX
+    (b) => b.z >= GRID_Z_MIN && b.z <= GRID_Z_MAX
   );
 
   // 1. 2D Projected Shadow Coordinates on the Neighboring Buildings Wall
@@ -557,7 +705,7 @@ export function checkWinCondition(
     centralZoneBlocks.map((b) => `${b.x}-${b.z}`)
   );
 
-  // 3. Intersection check: Does the 60° Sun shadow from any block hit any balcony resident?
+  // 3. Intersection check: Does the 40° Sun shadow from any block hit any balcony resident?
   const windowCoordinateSet = new Set<string>(
     windowCoordinates.map(([wx, wy]) => `${wx}-${wy}`)
   );
@@ -573,11 +721,11 @@ export function checkWinCondition(
     }
   }
 
-  // 4. Staging Area vs Central Building Zone placement check
+  // 4. Staging Area vs Central Building Zone placement check (respecting limited allowedFloorSet)
   let placedPiecesCount = 0;
   let unplacedPiecesCount = 0;
   for (const piece of pieces) {
-    if (isPieceInCentralZone(piece)) {
+    if (isPieceInCentralZone(piece, allowedFloorSet)) {
       placedPiecesCount++;
     } else {
       unplacedPiecesCount++;
@@ -585,7 +733,7 @@ export function checkWinCondition(
   }
   const allBlocksPlaced = unplacedPiecesCount === 0 && pieces.length > 0;
 
-  // Angled Floor Shadow Projection under 60° Sun
+  // Angled Floor Shadow Projection under 40° Sun
   const { targetShadow, coords: targetShadowCoords } = getTargetShadow(
     pieces,
     LIGHT_POSITION
@@ -613,9 +761,8 @@ export function checkWinCondition(
   const wallStencils: StencilElement[] = [];
   const floorStencils: StencilElement[] = [];
 
-  // Initialize 5x5 2D grids for HUD preview (indices 0..4 map to coords -2..+2)
-  const wallGrid = Array.from({ length: 5 }, () =>
-    Array.from({ length: 5 }, () => ({
+  const wallGrid = Array.from({ length: 7 }, () =>
+    Array.from({ length: 7 }, () => ({
       target: false,
       current: false,
       isWindow: false,
@@ -624,19 +771,18 @@ export function checkWinCondition(
     }))
   );
 
-  const floorGrid = Array.from({ length: 5 }, () =>
-    Array.from({ length: 5 }, () => ({
+  const floorGrid = Array.from({ length: 7 }, () =>
+    Array.from({ length: 7 }, () => ({
       target: false,
       current: false,
       profile: undefined as SilhouetteProfile | undefined,
     }))
   );
 
-  // Mark balcony coordinates on the 5x5 Neighboring Building Wall grid
   for (const [wx, wy] of windowCoordinates) {
-    const gx = wx + 2;
+    const gx = wx + 3;
     const gy = wy;
-    if (gx >= 0 && gx < 5 && gy >= 0 && gy < 5) {
+    if (gx >= 0 && gx < 7 && gy >= 0 && gy < 7) {
       const isBlocked = blockedWindowSet.has(`${wx}-${wy}`);
       wallGrid[gy][gx].target = true;
       wallGrid[gy][gx].isWindow = true;
@@ -645,12 +791,11 @@ export function checkWinCondition(
     }
   }
 
-  // Populate current player shadow & central zone occupancy on the 5x5 grids
   let sunSafePiecesCount = 0;
   for (const piece of pieces) {
     const [w, h, d] = piece.dims;
     const [cx, cy, cz] = piece.position;
-    const inCentral = isPieceInCentralZone(piece);
+    const inCentral = isPieceInCentralZone(piece, allowedFloorSet);
 
     const pieceBlocks = deriveBlocksFromPieces([piece]);
     const blocksAnyBalcony =
@@ -666,16 +811,16 @@ export function checkWinCondition(
     if (inCentral) {
       for (let dx = 0; dx < w; dx++) {
         for (let dy = 0; dy < h; dy++) {
-          const gx = cx + dx + 2;
+          const gx = cx + dx + 3;
           const gy = cy + dy;
-          if (gx >= 0 && gx < 5 && gy >= 0 && gy < 5) {
+          if (gx >= 0 && gx < 7 && gy >= 0 && gy < 7) {
             wallGrid[gy][gx].current = true;
           }
         }
         for (let dz = 0; dz < d; dz++) {
-          const gx = cx + dx + 2;
+          const gx = cx + dx + 3;
           const gz = cz + dz + 2;
-          if (gx >= 0 && gx < 5 && gz >= 0 && gz < 5) {
+          if (gx >= 0 && gx < 7 && gz >= 0 && gz < 7) {
             floorGrid[gz][gx].current = true;
             floorGrid[gz][gx].target = true;
             floorGrid[gz][gx].profile = piece.floorSilhouette;
@@ -686,7 +831,6 @@ export function checkWinCondition(
   }
 
   const totalPieces = pieces.length;
-  // Win State: All blocks from staging area placed in central building zone AND zero balconies shaded
   const isWin = allBlocksPlaced && blockedWindowSet.size === 0;
 
   return {
@@ -724,12 +868,12 @@ export function checkWinCondition(
 }
 
 export const CAMERA_PRESETS: CameraPreset[] = [
-  { id: 'iso-ne', label: 'Isometric NE', position: [13, 12, 14], zoom: 44 },
-  { id: 'iso-nw', label: 'Isometric NW', position: [-13, 12, 14], zoom: 44 },
-  { id: 'iso-se', label: 'Isometric SE', position: [13, 12, -13], zoom: 44 },
-  { id: 'front', label: 'Neighbor Balconies (XY)', position: [0, 0, 18], zoom: 52 },
-  { id: 'top', label: 'Site Plan (XZ)', position: [0.01, 18, 1.0], zoom: 46 },
-  { id: 'side', label: 'Elevation (YZ)', position: [18, 0, 1.0], zoom: 50 },
+  { id: 'iso-ne', label: 'Isometric NE', position: [12, 10.5, 13], zoom: 60 },
+  { id: 'iso-nw', label: 'Isometric NW', position: [-12, 10.5, 13], zoom: 60 },
+  { id: 'iso-se', label: 'Isometric SE', position: [12, 10.5, -12], zoom: 60 },
+  { id: 'front', label: 'Neighbor Balconies (XY)', position: [0, 0, 16], zoom: 68 },
+  { id: 'top', label: 'Site Plan (XZ)', position: [0.01, 16, 0.8], zoom: 62 },
+  { id: 'side', label: 'Elevation (YZ)', position: [16, 0, 0.8], zoom: 64 },
 ];
 
 export const GLASS_THEMES: Record<GlassThemeId, GlassTheme> = {
@@ -779,27 +923,52 @@ export const PUZZLE_LEVELS: PuzzleLevel[] = [
   {
     id: 'level-1-monument',
     number: '01',
-    title: '01. Sunlit Balconies',
+    title: '01. Courtyard Garden Setbacks',
     subtitle:
-      'Use the Tower Crane to move modules that shade the neighboring balcony residents and stack all Staging Area blocks in the Central Zone.',
+      'Rotate blocks around X, Y, and Z to fit all 8 skyscraper modules onto the 14 limited concrete pads while keeping 12 irregular neighbor balconies in the 40° sun.',
     windowCoordinates: [
-      [-2, 0],
-      [-2, 2],
+      [-3, 0],
+      [-3, 3],
+      [-2, 1],
+      [-2, 4],
       [-1, 0],
       [-1, 2],
-      [1, 0],
-      [1, 2],
+      [0, 3],
+      [1, 1],
+      [1, 4],
       [2, 0],
       [2, 2],
+      [3, 1],
+    ],
+    // Only 14 buildable structural pads out of 35 cells (the other 21 cells are lush courtyard gardens!)
+    allowedFloorCells: [
+      // Rear row piers (initial shaded positions that must be relocated/rotated)
+      [-3, -2],
+      [-2, -2],
+      [-1, -2],
+      [2, -2],
+      // Limited sun-safe structural islands surrounded by courtyard gardens
+      [-3, 1],
+      [-3, 2],
+      [-2, 2],
+      [0, 0],
+      [0, 1],
+      [0, 2],
+      [2, 1],
+      [2, 2],
+      [3, 1],
+      [3, 2],
     ],
     pieces: [
       {
         id: 'p1-base-beam',
-        name: 'Podium Retail Base (2×1×1)',
+        name: 'Podium Retail Beam (2×1×1)',
         shape: 'beam-wide',
         dims: [2, 1, 1],
-        targetPosition: [-1, 0, 1],
-        initialPosition: [-1, 0, -2],
+        baseDims: [2, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [-3, 0, 2],
+        initialPosition: [-3, 0, -2],
         accentColor: '#38bdf8',
         wallSilhouette: 'rect',
         floorSilhouette: 'rect',
@@ -809,21 +978,39 @@ export const PUZZLE_LEVELS: PuzzleLevel[] = [
         name: 'Glass Curtain Core (1×2×1)',
         shape: 'pillar-tall',
         dims: [1, 2, 1],
-        targetPosition: [0, 1, 1],
-        initialPosition: [-1, 1, -2],
+        baseDims: [1, 2, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [0, 0, 2],
+        initialPosition: [-1, 0, -2],
         accentColor: '#818cf8',
         wallSilhouette: 'rect',
         floorSilhouette: 'rect',
       },
       {
-        id: 'p1-pyramid',
-        name: 'Tapered Spire Module (1×1×1)',
-        shape: 'pyramid',
+        id: 'p1-east-cube',
+        name: 'Corner Habitat Unit (1×1×1)',
+        shape: 'cube',
         dims: [1, 1, 1],
-        targetPosition: [0, 3, 1],
-        initialPosition: [-2, 0, 3],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [2, 0, 2],
+        initialPosition: [2, 0, -2],
+        accentColor: '#f43f5e',
+        wallSilhouette: 'rect',
+        floorSilhouette: 'rect',
+      },
+      {
+        id: 'p1-deep-span',
+        name: 'Garden Bridge Span (2×1×1)',
+        shape: 'beam-wide',
+        // Starts wide [2,1,1] in staging; rotate around Y-axis to [1,1,2] to fit the narrow [0,0..1] pier!
+        dims: [2, 1, 1],
+        baseDims: [2, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [2, 0, 1],
+        initialPosition: [-3, 0, 3],
         accentColor: '#fbbf24',
-        wallSilhouette: 'triangle',
+        wallSilhouette: 'rect',
         floorSilhouette: 'rect',
       },
       {
@@ -831,21 +1018,51 @@ export const PUZZLE_LEVELS: PuzzleLevel[] = [
         name: 'Skylight Prism Unit (1×1×1)',
         shape: 'prism',
         dims: [1, 1, 1],
-        targetPosition: [1, 0, 1],
-        initialPosition: [0, 0, 3],
-        accentColor: '#f43f5e',
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [0, 0, 1],
+        initialPosition: [-1, 0, 3],
+        accentColor: '#fb923c',
         wallSilhouette: 'triangle',
         floorSilhouette: 'rect',
       },
       {
-        id: 'p1-cube',
-        name: 'Pre-Cast Corner Module (1×1×1)',
+        id: 'p1-cube-a',
+        name: 'Pre-Cast Terrace Pod (1×1×1)',
         shape: 'cube',
         dims: [1, 1, 1],
-        targetPosition: [2, 0, 1],
-        initialPosition: [2, 0, 3],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [3, 0, 2],
+        initialPosition: [1, 0, 3],
         accentColor: '#34d399',
         wallSilhouette: 'rect',
+        floorSilhouette: 'rect',
+      },
+      {
+        id: 'p1-cube-b',
+        name: 'Modular Loft Cube (1×1×1)',
+        shape: 'cube-small',
+        dims: [1, 1, 1],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [-3, 0, 1],
+        initialPosition: [3, 0, 3],
+        accentColor: '#a78bfa',
+        wallSilhouette: 'rect',
+        floorSilhouette: 'rect',
+      },
+      {
+        id: 'p1-wedge',
+        name: 'Solar Stepback Wedge (1×1×1)',
+        shape: 'wedge',
+        dims: [1, 1, 1],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [0, 0, 0],
+        initialPosition: [0, 0, 4],
+        accentColor: '#2dd4bf',
+        wallSilhouette: 'triangle',
         floorSilhouette: 'rect',
       },
     ],
@@ -853,18 +1070,44 @@ export const PUZZLE_LEVELS: PuzzleLevel[] = [
   {
     id: 'level-2-temple',
     number: '02',
-    title: '02. Twin Neighbor Terraces',
+    title: '02. Botanical Pocket Piers',
     subtitle:
-      'Relocate the 2×2 Atrium casting a 60° sun shadow onto the West Tower balconies and crane all Staging Area units into sunlit central columns.',
+      'Use X, Y, and Z rotations to orient 9 asymmetric modules onto 15 scattered foundation piers without intruding on the garden courtyard or shading 13 balconies.',
     windowCoordinates: [
+      [-3, 1],
+      [-3, 4],
       [-2, 0],
-      [-2, 1],
-      [-1, 0],
-      [-1, 2],
+      [-2, 2],
+      [-1, 1],
+      [-1, 3],
+      [0, 2],
+      [0, 4],
       [1, 0],
-      [1, 2],
-      [2, 0],
+      [1, 3],
       [2, 1],
+      [2, 4],
+      [3, 0],
+    ],
+    // 15 buildable structural cells arranged in 3 tight islands separated by gardens
+    allowedFloorCells: [
+      [-2, -2],
+      [-1, -2],
+      [1, -2],
+      [3, -2],
+      // West L-island
+      [-3, 1],
+      [-3, 2],
+      [-2, 2],
+      // Central 2x2 atrium pad
+      [-1, 1],
+      [0, 1],
+      [-1, 2],
+      [0, 2],
+      // East narrow spine & corner pad
+      [1, 1],
+      [1, 2],
+      [2, 2],
+      [3, 2],
     ],
     pieces: [
       {
@@ -872,9 +1115,38 @@ export const PUZZLE_LEVELS: PuzzleLevel[] = [
         name: 'Double-Height Atrium (2×2×1)',
         shape: 'cube-large',
         dims: [2, 2, 1],
-        targetPosition: [-1, 0, 1],
+        baseDims: [2, 2, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [-1, 0, 2],
         initialPosition: [-2, 0, -2],
         accentColor: '#38bdf8',
+        wallSilhouette: 'rect',
+        floorSilhouette: 'rect',
+      },
+      {
+        id: 'p2-east-pillar',
+        name: 'Rotatable Tower Column (1×2×1)',
+        shape: 'pillar-tall',
+        // Can be rotated around X or Z to lie flat as [1,1,2] or [2,1,1] on the foundation pads!
+        dims: [1, 2, 1],
+        baseDims: [1, 2, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [2, 0, 2],
+        initialPosition: [1, 0, -2],
+        accentColor: '#818cf8',
+        wallSilhouette: 'rect',
+        floorSilhouette: 'rect',
+      },
+      {
+        id: 'p2-west-cube',
+        name: 'West Corner Module (1×1×1)',
+        shape: 'cube',
+        dims: [1, 1, 1],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [-3, 0, 2],
+        initialPosition: [3, 0, -2],
+        accentColor: '#f43f5e',
         wallSilhouette: 'rect',
         floorSilhouette: 'rect',
       },
@@ -883,19 +1155,24 @@ export const PUZZLE_LEVELS: PuzzleLevel[] = [
         name: 'Solar Gable Prism (1×1×1)',
         shape: 'prism',
         dims: [1, 1, 1],
-        targetPosition: [0, 2, 1],
-        initialPosition: [-2, 0, 3],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [-2, 0, 2],
+        initialPosition: [-3, 0, 3],
         accentColor: '#a78bfa',
         wallSilhouette: 'triangle',
         floorSilhouette: 'rect',
       },
       {
         id: 'p2-deep-beam',
-        name: 'Cantilever Annex (1×1×2)',
-        shape: 'beam-deep',
-        dims: [1, 1, 2],
-        targetPosition: [1, 0, 0],
-        initialPosition: [0, 0, 3],
+        name: 'Cantilever Annex (2×1×1)',
+        shape: 'beam-wide',
+        // Starts wide [2,1,1] in staging; rotate around Y to [1,1,2] to fit [1, 1..2]!
+        dims: [2, 1, 1],
+        baseDims: [2, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [-1, 0, 1],
+        initialPosition: [-1, 0, 3],
         accentColor: '#fb923c',
         wallSilhouette: 'rect',
         floorSilhouette: 'rect',
@@ -905,42 +1182,95 @@ export const PUZZLE_LEVELS: PuzzleLevel[] = [
         name: 'Penthouse Crown (1×1×1)',
         shape: 'pyramid',
         dims: [1, 1, 1],
-        targetPosition: [0, 3, 1],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [3, 0, 2],
         initialPosition: [1, 0, 3],
         accentColor: '#fbbf24',
         wallSilhouette: 'triangle',
         floorSilhouette: 'rect',
       },
       {
-        id: 'p2-cube',
+        id: 'p2-cube-b',
         name: 'Steel Frame Module (1×1×1)',
         shape: 'cube',
         dims: [1, 1, 1],
-        targetPosition: [-1, 2, 1],
-        initialPosition: [2, 0, 3],
-        accentColor: '#f43f5e',
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [-3, 0, 1],
+        initialPosition: [3, 0, 3],
+        accentColor: '#34d399',
         wallSilhouette: 'rect',
         floorSilhouette: 'rect',
+      },
+      {
+        id: 'p2-sphere',
+        name: 'Geodesic Lounge Pod (1×1×1)',
+        shape: 'sphere',
+        dims: [1, 1, 1],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [1, 0, 1],
+        initialPosition: [-2, 0, 4],
+        accentColor: '#2dd4bf',
+        wallSilhouette: 'circle',
+        floorSilhouette: 'circle',
+      },
+      {
+        id: 'p2-octa',
+        name: 'Faceted Atrium Node (1×1×1)',
+        shape: 'octahedron',
+        dims: [1, 1, 1],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [1, 0, 2],
+        initialPosition: [2, 0, 4],
+        accentColor: '#e879f9',
+        wallSilhouette: 'diamond',
+        floorSilhouette: 'diamond',
       },
     ],
   },
   {
     id: 'level-3-citadel',
     number: '03',
-    title: '03. Stepback Balcony Zoning',
+    title: '03. Diagonal Greenway Zoning',
     subtitle:
-      'Keep the 60° sunbeams clear of all 10 neighboring balconies while stacking every modular unit with the Tower Crane.',
+      'Rotate beams and columns in 3D (X/Y/Z) to bridge 15 diagonal structural pads while keeping 14 neighbor balconies completely sunlit.',
     windowCoordinates: [
-      [-2, 0],
+      [-3, 0],
+      [-3, 2],
       [-2, 1],
-      [-2, 2],
+      [-2, 3],
       [-1, 0],
       [-1, 2],
+      [-1, 4],
+      [0, 3],
       [1, 0],
       [1, 2],
-      [2, 0],
+      [2, 1],
+      [2, 3],
+      [3, 0],
+      [3, 2],
+    ],
+    // 15 buildable structural cells with a diagonal greenway park cutting across the plot
+    allowedFloorCells: [
+      [-3, -2],
+      [-2, -2],
+      [-1, -2],
+      [1, -2],
+      [2, -2],
+      [3, -2],
+      // Buildable forward & mid pads
+      [-3, 1],
+      [-3, 2],
+      [-2, 2],
+      [0, 0],
+      [0, 1],
+      [0, 2],
       [2, 1],
       [2, 2],
+      [3, 2],
     ],
     pieces: [
       {
@@ -948,8 +1278,10 @@ export const PUZZLE_LEVELS: PuzzleLevel[] = [
         name: 'Foundation Podium (2×1×1)',
         shape: 'beam-wide',
         dims: [2, 1, 1],
-        targetPosition: [-2, 0, 1],
-        initialPosition: [1, 0, -2],
+        baseDims: [2, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [-3, 0, 2],
+        initialPosition: [-3, 0, -2],
         accentColor: '#38bdf8',
         wallSilhouette: 'rect',
         floorSilhouette: 'rect',
@@ -959,9 +1291,37 @@ export const PUZZLE_LEVELS: PuzzleLevel[] = [
         name: 'Stepback Core Pillar (1×2×1)',
         shape: 'pillar-tall',
         dims: [1, 2, 1],
-        targetPosition: [0, 0, 1],
-        initialPosition: [1, 1, -2],
+        baseDims: [1, 2, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [0, 0, 2],
+        initialPosition: [-1, 0, -2],
         accentColor: '#818cf8',
+        wallSilhouette: 'rect',
+        floorSilhouette: 'rect',
+      },
+      {
+        id: 'p3-east-beam',
+        name: 'East Plaza Span (2×1×1)',
+        shape: 'beam-wide',
+        dims: [2, 1, 1],
+        baseDims: [2, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [2, 0, 2],
+        initialPosition: [1, 0, -2],
+        accentColor: '#f43f5e',
+        wallSilhouette: 'rect',
+        floorSilhouette: 'rect',
+      },
+      {
+        id: 'p3-corner-cube',
+        name: 'Terrace Corner Cube (1×1×1)',
+        shape: 'cube',
+        dims: [1, 1, 1],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [2, 0, 1],
+        initialPosition: [3, 0, -2],
+        accentColor: '#fb923c',
         wallSilhouette: 'rect',
         floorSilhouette: 'rect',
       },
@@ -970,8 +1330,10 @@ export const PUZZLE_LEVELS: PuzzleLevel[] = [
         name: 'Mechanical Prism (1×1×1)',
         shape: 'prism',
         dims: [1, 1, 1],
-        targetPosition: [-1, 1, 1],
-        initialPosition: [-2, 0, 3],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [-3, 0, 1],
+        initialPosition: [-3, 0, 3],
         accentColor: '#34d399',
         wallSilhouette: 'triangle',
         floorSilhouette: 'rect',
@@ -981,55 +1343,113 @@ export const PUZZLE_LEVELS: PuzzleLevel[] = [
         name: 'Beacon Spire (1×1×1)',
         shape: 'pyramid',
         dims: [1, 1, 1],
-        targetPosition: [0, 2, 1],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [-3, 1, 2],
         initialPosition: [-1, 0, 3],
-        accentColor: '#f43f5e',
+        accentColor: '#fbbf24',
         wallSilhouette: 'triangle',
         floorSilhouette: 'rect',
       },
       {
         id: 'p3-deep',
-        name: 'Deep Plaza Module (1×1×2)',
-        shape: 'beam-deep',
-        dims: [1, 1, 2],
-        targetPosition: [1, 0, 0],
+        name: 'Deep Plaza Module (2×1×1)',
+        shape: 'beam-wide',
+        // Starts as [2, 1, 1] in staging; rotate around Y-axis to [1, 1, 2] to fit [0, 0..1]!
+        dims: [2, 1, 1],
+        baseDims: [2, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [-3, 1, 2],
         initialPosition: [1, 0, 3],
-        accentColor: '#fbbf24',
+        accentColor: '#a78bfa',
         wallSilhouette: 'rect',
         floorSilhouette: 'rect',
       },
       {
-        id: 'p3-cube',
+        id: 'p3-cube-a',
         name: 'Steel Frame Unit (1×1×1)',
         shape: 'cube',
         dims: [1, 1, 1],
-        targetPosition: [1, 1, 1],
-        initialPosition: [2, 0, 3],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [0, 0, 0],
+        initialPosition: [3, 0, 3],
         accentColor: '#2dd4bf',
         wallSilhouette: 'rect',
         floorSilhouette: 'rect',
+      },
+      {
+        id: 'p3-wedge',
+        name: 'Cantilever Wedge (1×1×1)',
+        shape: 'wedge',
+        dims: [1, 1, 1],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [0, 0, 1],
+        initialPosition: [-2, 0, 4],
+        accentColor: '#e879f9',
+        wallSilhouette: 'triangle',
+        floorSilhouette: 'rect',
+      },
+      {
+        id: 'p3-sphere',
+        name: 'Skyline Solarium (1×1×1)',
+        shape: 'sphere',
+        dims: [1, 1, 1],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [3, 1, 2],
+        initialPosition: [2, 0, 4],
+        accentColor: '#38bdf8',
+        wallSilhouette: 'circle',
+        floorSilhouette: 'circle',
       },
     ],
   },
   {
     id: 'level-4-observatory',
     number: '04',
-    title: '04. High-Rise Solar Terrace',
+    title: '04. Metropolitan Eco-Tower',
     subtitle:
-      'Construct a 6-module tower in the central plot so the single 60° sun casts zero shadows onto the 12 neighboring balconies.',
+      'Master 3-axis block rotation (X, Y, Z) to interlock 11 skyscraper modules onto 16 tight foundation cells while preserving sunlight on all 15 neighbor balconies.',
     windowCoordinates: [
-      [-2, 0],
+      [-3, 0],
+      [-3, 2],
+      [-3, 4],
       [-2, 1],
-      [-2, 2],
+      [-2, 3],
       [-1, 0],
-      [-1, 1],
       [-1, 2],
-      [1, 0],
+      [0, 2],
+      [0, 4],
       [1, 1],
-      [1, 2],
+      [1, 3],
       [2, 0],
+      [2, 2],
+      [3, 1],
+      [3, 3],
+    ],
+    // 16 buildable cells surrounded by 19 restricted garden sanctuary cells
+    allowedFloorCells: [
+      [-3, -2],
+      [-1, -2],
+      [1, -2],
+      [2, -2],
+      [3, -2],
+      // West narrow pier (1x3 along Z)
+      [-3, 0],
+      [-3, 1],
+      [-3, 2],
+      // Central T-pad
+      [-1, 2],
+      [0, 1],
+      [0, 2],
+      [1, 2],
+      // East stepped island
       [2, 1],
       [2, 2],
+      [3, 1],
+      [3, 2],
     ],
     pieces: [
       {
@@ -1037,8 +1457,10 @@ export const PUZZLE_LEVELS: PuzzleLevel[] = [
         name: 'Central Core Pillar (1×2×1)',
         shape: 'pillar-tall',
         dims: [1, 2, 1],
-        targetPosition: [0, 0, 1],
-        initialPosition: [-1, 0, -2],
+        baseDims: [1, 2, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [0, 0, 2],
+        initialPosition: [-3, 0, -2],
         accentColor: '#38bdf8',
         wallSilhouette: 'rect',
         floorSilhouette: 'rect',
@@ -1047,9 +1469,12 @@ export const PUZZLE_LEVELS: PuzzleLevel[] = [
         id: 'p4-cyl',
         name: 'Cylindrical Atrium (1×2×1)',
         shape: 'cylinder',
+        // Rotate around X or Z to place horizontally or stack carefully!
         dims: [1, 2, 1],
-        targetPosition: [0, 0, 2],
-        initialPosition: [-2, 0, 3],
+        baseDims: [1, 2, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [2, 0, 2],
+        initialPosition: [-1, 0, -2],
         accentColor: '#a78bfa',
         wallSilhouette: 'rect',
         floorSilhouette: 'circle',
@@ -1059,21 +1484,78 @@ export const PUZZLE_LEVELS: PuzzleLevel[] = [
         name: 'Skywalk Span (2×1×1)',
         shape: 'beam-wide',
         dims: [2, 1, 1],
-        targetPosition: [-1, 0, 0],
-        initialPosition: [-1, 0, 3],
+        baseDims: [2, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [-1, 0, 2],
+        initialPosition: [1, 0, -2],
         accentColor: '#34d399',
         wallSilhouette: 'rect',
         floorSilhouette: 'rect',
       },
       {
-        id: 'p4-pyramid',
+        id: 'p4-east-cube',
+        name: 'East Terrace Pod (1×1×1)',
+        shape: 'cube',
+        dims: [1, 1, 1],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [3, 0, 2],
+        initialPosition: [3, 0, -2],
+        accentColor: '#f43f5e',
+        wallSilhouette: 'rect',
+        floorSilhouette: 'rect',
+      },
+      {
+        id: 'p4-habitat',
         name: 'Pre-Cast Habitat (1×1×1)',
         shape: 'cube',
         dims: [1, 1, 1],
-        targetPosition: [1, 0, 1],
-        initialPosition: [1, 0, 3],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [-3, 0, 2],
+        initialPosition: [-3, 0, 3],
         accentColor: '#fbbf24',
         wallSilhouette: 'rect',
+        floorSilhouette: 'rect',
+      },
+      {
+        id: 'p4-prism',
+        name: 'Angled Louver Prism (1×1×1)',
+        shape: 'prism',
+        dims: [1, 1, 1],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [1, 0, 2],
+        initialPosition: [-1, 0, 3],
+        accentColor: '#fb923c',
+        wallSilhouette: 'triangle',
+        floorSilhouette: 'rect',
+      },
+      {
+        id: 'p4-deep',
+        name: 'Promenade Bridge (2×1×1)',
+        shape: 'beam-wide',
+        // Starts wide [2,1,1] in staging; rotate around Y-axis to [1,1,2] to fit West pier [-3, 0..1]!
+        dims: [2, 1, 1],
+        baseDims: [2, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [2, 0, 1],
+        initialPosition: [1, 0, 3],
+        accentColor: '#2dd4bf',
+        wallSilhouette: 'rect',
+        floorSilhouette: 'rect',
+      },
+      {
+        id: 'p4-pyramid',
+        name: 'Lantern Spire (1×1×1)',
+        shape: 'pyramid',
+        dims: [1, 1, 1],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [-3, 0, 0],
+        initialPosition: [3, 0, 3],
+        accentColor: '#e879f9',
+        wallSilhouette: 'triangle',
         floorSilhouette: 'rect',
       },
       {
@@ -1081,8 +1563,10 @@ export const PUZZLE_LEVELS: PuzzleLevel[] = [
         name: 'Observatory Dome (1×1×1)',
         shape: 'sphere',
         dims: [1, 1, 1],
-        targetPosition: [0, 2, 1],
-        initialPosition: [2, 0, 3],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [0, 0, 1],
+        initialPosition: [-2, 0, 4],
         accentColor: '#f43f5e',
         wallSilhouette: 'circle',
         floorSilhouette: 'circle',
@@ -1092,12 +1576,28 @@ export const PUZZLE_LEVELS: PuzzleLevel[] = [
         name: 'Diamond Crown Spire (1×1×1)',
         shape: 'octahedron',
         dims: [1, 1, 1],
-        targetPosition: [0, 3, 1],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [-3, 0, 1],
         initialPosition: [0, 0, 4],
-        accentColor: '#fb923c',
+        accentColor: '#38bdf8',
         wallSilhouette: 'diamond',
         floorSilhouette: 'diamond',
+      },
+      {
+        id: 'p4-wedge',
+        name: 'East Stepback Wedge (1×1×1)',
+        shape: 'wedge',
+        dims: [1, 1, 1],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [3, 0, 1],
+        initialPosition: [2, 0, 4],
+        accentColor: '#818cf8',
+        wallSilhouette: 'triangle',
+        floorSilhouette: 'rect',
       },
     ],
   },
 ];
+
