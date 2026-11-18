@@ -12,12 +12,16 @@ import {
   ArrowUp,
   Award,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Eye,
+  Grid,
   Rotate3d,
   RotateCcw,
   Undo2,
   Volume2,
   VolumeX,
+  X,
 } from 'lucide-react';
 import {
   CameraPresetId,
@@ -50,6 +54,8 @@ export default function App() {
   const history = usePuzzleStore((s) => s.history);
   const movesCount = usePuzzleStore((s) => s.movesCount);
   const lastCraneTransfer = usePuzzleStore((s) => s.lastCraneTransfer);
+  const isCraneAnimating = usePuzzleStore((s) => s.isCraneAnimating);
+  const setCraneAnimating = usePuzzleStore((s) => s.setCraneAnimating);
   const selectPiece = usePuzzleStore((s) => s.selectPiece);
   const cycleSelectedPiece = usePuzzleStore((s) => s.cycleSelectedPiece);
   const rotateSelectedPiece = usePuzzleStore((s) => s.rotateSelectedPiece);
@@ -61,12 +67,22 @@ export default function App() {
   const undo = usePuzzleStore((s) => s.undo);
 
   const [modalDismissedForView, setModalDismissedForView] = useState<boolean>(false);
+  const [levelDrawerOpen, setLevelDrawerOpen] = useState<boolean>(false);
   const [themeId] = useState<GlassThemeId>('cyan');
   const [dragPlaneMode] = useState<'XY' | 'XZ'>('XY');
   const [activeCameraPreset, setActiveCameraPreset] = useState<CameraPresetId | null>('iso-ne');
   const [isMuted, setIsMuted] = useState<boolean>(soundFX.isMuted);
 
   const solvedCelebratedRef = useRef<string | null>(null);
+
+  // Safety fallback timer so isCraneAnimating never stays true if a spring animation is interrupted
+  useEffect(() => {
+    if (!isCraneAnimating || !lastCraneTransfer) return;
+    const timer = window.setTimeout(() => {
+      setCraneAnimating(false);
+    }, 2400);
+    return () => window.clearTimeout(timer);
+  }, [isCraneAnimating, lastCraneTransfer, setCraneAnimating]);
 
   // Subscribe to CityAudioManager mute state, initialize Capacitor native shell, & unlock ambient cityscape audio
   useEffect(() => {
@@ -138,9 +154,9 @@ export default function App() {
     setHasWon,
   ]);
 
-  // Trigger celebration when hasWon becomes true
+  // Trigger celebration and score modal ONLY after the final block finishes moving to its selected position
   useEffect(() => {
-    if (hasWon && solvedCelebratedRef.current !== activeLevel.id) {
+    if (hasWon && !isCraneAnimating && solvedCelebratedRef.current !== activeLevel.id) {
       solvedCelebratedRef.current = activeLevel.id;
       setModalDismissedForView(false);
       soundFX.playPuzzleSolved();
@@ -157,16 +173,23 @@ export default function App() {
       solvedCelebratedRef.current = null;
       setModalDismissedForView(false);
     }
-  }, [hasWon, activeLevel.id]);
+  }, [hasWon, isCraneAnimating, activeLevel.id]);
 
   const handleSelectLevel = useCallback(
     (levelId: string) => {
       setLevel(levelId);
       solvedCelebratedRef.current = null;
       setModalDismissedForView(false);
+      setLevelDrawerOpen(false);
     },
     [setLevel]
   );
+
+  const handlePrevLevel = useCallback(() => {
+    const idx = PUZZLE_LEVELS.findIndex((l) => l.id === activeLevelId);
+    const prev = PUZZLE_LEVELS[(idx - 1 + PUZZLE_LEVELS.length) % PUZZLE_LEVELS.length];
+    handleSelectLevel(prev.id);
+  }, [activeLevelId, handleSelectLevel]);
 
   const handleNextLevel = useCallback(() => {
     const idx = PUZZLE_LEVELS.findIndex((l) => l.id === activeLevelId);
@@ -262,26 +285,45 @@ export default function App() {
           PrismGrid 3D
         </a>
 
-        {/* Zone 2: Responsive Level Links + Quiet Inline Right-to-Light Telemetry */}
-        <nav className="flex items-center gap-2 sm:gap-4 text-xs sm:text-sm font-medium text-slate-400 min-w-0 overflow-x-auto">
-          {PUZZLE_LEVELS.map((lvl) => {
-            const isCurrent = activeLevelId === lvl.id;
-            return (
-              <button
-                key={lvl.id}
-                type="button"
-                onClick={() => handleSelectLevel(lvl.id)}
-                className={`py-1 px-1 transition-colors cursor-pointer whitespace-nowrap shrink-0 underline-offset-4 ${
-                  isCurrent
-                    ? 'text-sky-400 underline decoration-sky-400 decoration-2 font-semibold'
-                    : 'hover:text-slate-100'
-                }`}
-              >
-                <span className="sm:hidden">L{lvl.number}</span>
-                <span className="hidden sm:inline">Level {lvl.number}</span>
-              </button>
-            );
-          })}
+        {/* Zone 2: Compact 20-Level Navigation + Quiet Inline Right-to-Light Telemetry */}
+        <nav className="flex items-center gap-1.5 sm:gap-3 text-xs sm:text-sm font-medium text-slate-400 min-w-0">
+          <div className="flex items-center gap-1 rounded-lg bg-slate-900/90 border border-slate-700/80 p-0.5">
+            <button
+              type="button"
+              data-testid="prev-level-button"
+              onClick={handlePrevLevel}
+              className="p-1 rounded hover:bg-slate-800 text-slate-300 hover:text-white transition-colors cursor-pointer"
+              title="Previous Level"
+            >
+              <ChevronLeft className="w-3.5 h-3.5" />
+            </button>
+
+            <button
+              type="button"
+              data-testid="level-selector-button"
+              onClick={() => setLevelDrawerOpen((prev) => !prev)}
+              className="flex items-center gap-1.5 px-2 sm:px-2.5 py-0.5 rounded hover:bg-slate-800 text-sky-300 font-semibold transition-colors cursor-pointer whitespace-nowrap"
+              title="Browse all 20 architectural Right-to-Light levels"
+            >
+              <Grid className="w-3.5 h-3.5 text-sky-400" />
+              <span className="font-mono-tabular text-xs">
+                Level {activeLevel.number} / {PUZZLE_LEVELS.length}
+              </span>
+              <span className="hidden lg:inline text-slate-300 font-normal text-xs max-w-[175px] truncate">
+                — {activeLevel.title.replace(/^\d+\.\s*/, '')}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              data-testid="next-level-nav-button"
+              onClick={handleNextLevel}
+              className="p-1 rounded hover:bg-slate-800 text-slate-300 hover:text-white transition-colors cursor-pointer"
+              title="Next Level"
+            >
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
 
           <span aria-hidden="true" className="text-slate-700 hidden md:inline">
             ·
@@ -453,8 +495,81 @@ export default function App() {
         </div>
       </header>
 
-      {/* Level Cleared Overlay Modal when Right to Light Validator Passes */}
-      {hasWon && !modalDismissedForView && (
+      {/* 20-Level Selection Modal Drawer */}
+      {levelDrawerOpen && (
+        <div
+          data-testid="level-drawer-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Select Level"
+          className="fixed inset-0 z-30 flex items-center justify-center p-3 sm:p-5 bg-black/75 pointer-events-auto"
+          onClick={() => setLevelDrawerOpen(false)}
+        >
+          <div
+            className="w-full max-w-3xl max-h-[85dvh] overflow-y-auto rounded-2xl bg-[#0f172a] border border-slate-700 shadow-2xl p-4 sm:p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-3 pb-3 mb-4 border-b border-slate-800">
+              <div>
+                <div className="text-[10px] sm:text-xs font-mono-tabular uppercase tracking-widest text-sky-400 font-semibold">
+                  Right to Light Campaign
+                </div>
+                <h2 className="font-display text-lg sm:text-xl font-bold text-white">
+                  Select Architectural Level (01 – {PUZZLE_LEVELS.length})
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setLevelDrawerOpen(false)}
+                className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer"
+                aria-label="Close Level Selector"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+              {PUZZLE_LEVELS.map((lvl) => {
+                const isCurrent = lvl.id === activeLevelId;
+                const forwardSlotsCount = lvl.allowedFloorCells.filter(
+                  ([, fz]) => fz >= -1
+                ).length;
+                return (
+                  <button
+                    key={lvl.id}
+                    type="button"
+                    data-testid={`select-level-${lvl.number}`}
+                    onClick={() => handleSelectLevel(lvl.id)}
+                    className={`flex flex-col items-start text-left p-2.5 sm:p-3 rounded-xl border transition-all cursor-pointer ${
+                      isCurrent
+                        ? 'bg-sky-500/20 border-sky-400 text-white shadow-lg'
+                        : 'bg-slate-900/90 hover:bg-slate-800/90 border-slate-800 text-slate-300'
+                    }`}
+                  >
+                    <div className="w-full flex items-center justify-between gap-1 mb-1">
+                      <span className="font-mono-tabular text-xs font-bold text-sky-400">
+                        LVL {lvl.number}
+                      </span>
+                      <span className="font-mono-tabular text-[10px] text-amber-300">
+                        {lvl.pieces.length} Blocks
+                      </span>
+                    </div>
+                    <div className="font-semibold text-xs text-white line-clamp-1">
+                      {lvl.title.replace(/^\d+\.\s*/, '')}
+                    </div>
+                    <div className="mt-1 font-mono-tabular text-[10px] text-slate-400">
+                      {forwardSlotsCount} Tower Slots · {lvl.windowCoordinates.length} Balconies
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Level Cleared Overlay Modal when Right to Light Validator Passes AND Block Has Finished Moving */}
+      {hasWon && !isCraneAnimating && !modalDismissedForView && (
         <div
           data-testid="level-complete-modal"
           role="dialog"
@@ -474,10 +589,10 @@ export default function App() {
               id="level-complete-title"
               className="font-display text-xl sm:text-2xl font-bold text-white tracking-tight"
             >
-              Level Cleared
+              Level {activeLevel.number} Cleared
             </h2>
             <p className="mt-1 text-xs sm:text-sm text-slate-300">
-              {activeLevel.title} — All modular skyscraper units have been oriented and stacked onto the limited concrete foundation pads without shading a single neighbor balcony!
+              {activeLevel.title} — All modular skyscraper units have been oriented and stacked onto the highlighted foundation slots without shading a single neighbor balcony!
             </p>
 
             {/* Right to Light Summary Metrics */}
@@ -547,6 +662,7 @@ export default function App() {
           onNudgePiece={nudgePiece}
           onMovePieceTo={movePieceTo}
           onMoveSelectedWithGravity={moveSelectedWithGravity}
+          onCraneTransferComplete={() => setCraneAnimating(false)}
         />
       </main>
     </div>

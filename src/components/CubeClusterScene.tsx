@@ -2178,6 +2178,7 @@ interface DualShadowStageProps {
   floorStencils: StencilElement[];
   spacing: number;
   hasSelectedBlock: boolean;
+  occupiedGroundSet: Set<string>;
   hoveredColumn: HoveredColumnTarget | null;
   isCandidateValidCantilever: boolean;
   onHoverColumn: (col: HoveredColumnTarget | null) => void;
@@ -2190,6 +2191,7 @@ function DualShadowStage({
   blockedWindowSet,
   spacing,
   hasSelectedBlock,
+  occupiedGroundSet,
   hoveredColumn,
   isCandidateValidCantilever,
   onHoverColumn,
@@ -2394,13 +2396,16 @@ function DualShadowStage({
               );
             }
 
+            const isOccupiedGround = occupiedGroundSet.has(`${x},${z}`);
+            const isAvailableSlot = !isOccupiedGround;
+
             return (
               <group
                 key={`floor-cell-${x}-${z}`}
                 position={[x * spacing, 0.006, z * spacing]}
                 scale={[spacing, 1, spacing]}
               >
-                {/* Raised Reinforced Concrete Foundation Pad */}
+                {/* Raised Reinforced Concrete Foundation Pad — Available slots are highlighted in a distinct vibrant color */}
                 <mesh
                   rotation={[-Math.PI / 2, 0, 0]}
                   geometry={SHARED_CELL_GUIDE_GEO}
@@ -2426,21 +2431,31 @@ function DualShadowStage({
                     color={
                       isHoveredCell
                         ? '#38bdf8'
+                        : isAvailableSlot
+                        ? hasSelectedBlock
+                          ? '#10b981'
+                          : '#fde047'
                         : hasSelectedBlock
-                        ? '#bae6fd'
-                        : '#e2e8f0'
+                        ? '#93c5fd'
+                        : '#cbd5e1'
                     }
                     transparent
                     opacity={
                       isHoveredCell && hasSelectedBlock
-                        ? 0.55
+                        ? 0.85
+                        : isAvailableSlot
+                        ? hasSelectedBlock
+                          ? 0.72
+                          : 0.78
                         : hasSelectedBlock
-                        ? 0.36
-                        : 0.92
+                        ? 0.42
+                        : 0.55
                     }
                     depthWrite={false}
                   />
                 </mesh>
+
+                {/* Distinct Outer Border for Available Buildable Slots */}
                 <lineSegments
                   geometry={SHARED_CELL_GUIDE_EDGES}
                   rotation={[-Math.PI / 2, 0, 0]}
@@ -2450,20 +2465,41 @@ function DualShadowStage({
                     color={
                       isHoveredCell && hasSelectedBlock
                         ? '#0284c7'
+                        : isAvailableSlot
+                        ? hasSelectedBlock
+                          ? '#047857'
+                          : '#d97706'
                         : hasSelectedBlock
                         ? '#0369a1'
-                        : '#334155'
+                        : '#475569'
                     }
                     transparent
-                    opacity={
-                      isHoveredCell && hasSelectedBlock
-                        ? 1.0
-                        : hasSelectedBlock
-                        ? 0.9
-                        : 0.85
-                    }
+                    opacity={1.0}
                   />
                 </lineSegments>
+
+                {/* Inner Target Frame Indicator on Available Slots */}
+                {isAvailableSlot && (
+                  <lineSegments
+                    geometry={SHARED_CELL_GUIDE_EDGES}
+                    rotation={[-Math.PI / 2, 0, 0]}
+                    position={[0, 0.002, 0]}
+                    scale={[0.72, 0.72, 1]}
+                    raycast={() => null}
+                  >
+                    <lineBasicMaterial
+                      color={
+                        isHoveredCell
+                          ? '#0369a1'
+                          : hasSelectedBlock
+                          ? '#065f46'
+                          : '#b45309'
+                      }
+                      transparent
+                      opacity={0.85}
+                    />
+                  </lineSegments>
+                )}
               </group>
             );
           })
@@ -2593,10 +2629,12 @@ export interface CubeClusterSceneProps {
     preferLeftX?: boolean,
     preferBackZ?: boolean
   ) => boolean;
+  onCraneTransferComplete?: () => void;
 }
 
 export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
   pieces,
+  blocks,
   windowCoordinates,
   allowedFloorSet,
   blockedWindowSet,
@@ -2610,6 +2648,7 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
   onUserOrbitStart,
   onSelectPiece,
   onMoveSelectedWithGravity,
+  onCraneTransferComplete,
 }) => {
   const controlsRef = useRef<OrbitControlsImpl | null>(null);
   const [hoveredPieceId, setHoveredPieceId] = useState<string | null>(null);
@@ -2620,6 +2659,17 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
     () => pieces.find((p) => p.id === selectedPieceId) ?? null,
     [pieces, selectedPieceId]
   );
+
+  // Compute which Central Building Zone foundation cells (y = 0) are currently occupied by blocks
+  const occupiedGroundSet = useMemo(() => {
+    const set = new Set<string>();
+    for (const b of blocks) {
+      if (b.visible && b.y === 0 && b.z >= GRID_Z_MIN && b.z <= GRID_Z_MAX) {
+        set.add(`${b.x},${b.z}`);
+      }
+    }
+    return set;
+  }, [blocks]);
 
   // Track the crane hook's resting world coordinates between moves
   const prevHookRef = useRef<{ x: number; z: number }>({
@@ -2748,6 +2798,9 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
 
           // Heavy structural landing thud & grapple release when block settles into place
           soundFX.playCraneDropThud();
+
+          // Notify store/UI that the block has reached its final target position so win state/score can display
+          onCraneTransferComplete?.();
 
           // Step E (Part 2): Detach block at `toCenter` and retract hook up to CRANE_REST_Y
           soundFX.playCraneWinch('up', 0.24);
@@ -3069,6 +3122,7 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
           floorStencils={floorStencils}
           spacing={spacing}
           hasSelectedBlock={selectedPieceId !== null}
+          occupiedGroundSet={occupiedGroundSet}
           hoveredColumn={hoveredColumn}
           isCandidateValidCantilever={Boolean(
             candidatePlacement?.isCantilevered

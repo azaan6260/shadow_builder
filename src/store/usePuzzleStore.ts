@@ -73,6 +73,8 @@ interface PuzzleStoreState {
   allowedFloorSet: Set<string>;
   /** Phase 17: Most recent crane transfer operation for sequencing the 3D Tower Crane */
   lastCraneTransfer: CraneTransferOp | null;
+  /** Whether the Tower Crane is currently moving a block into position */
+  isCraneAnimating: boolean;
   /** Phase 12: Set of projected 2D angled shadow floor coordinates ("shadowX,shadowZ") */
   targetShadow: Set<string>;
   /** 2D array of [x, y] target coordinates on the back wall */
@@ -92,6 +94,7 @@ interface PuzzleStoreState {
   lastMoveInfo: string | null;
 
   setHasWon: (won: boolean) => void;
+  setCraneAnimating: (animating: boolean) => void;
   selectPiece: (id: string | null) => void;
   cycleSelectedPiece: () => void;
 
@@ -156,6 +159,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
     allowedFloorCells: initialAllowedCells,
     allowedFloorSet: initialAllowedSet,
     lastCraneTransfer: null,
+    isCraneAnimating: false,
     targetShadow: getTargetShadow(initialPieces).targetShadow,
     targetWallShape: getTargetWallShape(initialPieces),
     targetFloorShape: getTargetFloorShape(initialPieces),
@@ -169,6 +173,10 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
 
     setHasWon: (won) => {
       set({ hasWon: won });
+    },
+
+    setCraneAnimating: (animating) => {
+      set({ isCraneAnimating: animating });
     },
 
     selectPiece: (id) => {
@@ -376,6 +384,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
         blocks: nextBlocks,
         selectedBlockId: null,
         selectedPieceId: null,
+        isCraneAnimating: true,
         lastCraneTransfer: {
           seq: ++craneOpCounter,
           pieceId: activeId,
@@ -468,6 +477,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
           blocks: nextBlocks,
           selectedBlockId: id,
           selectedPieceId: id,
+          isCraneAnimating: true,
           lastCraneTransfer: {
             seq: ++craneOpCounter,
             pieceId: id,
@@ -520,6 +530,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
         blocks: nextBlocks,
         selectedBlockId: id,
         selectedPieceId: id,
+        isCraneAnimating: true,
         lastCraneTransfer: {
           seq: ++craneOpCounter,
           pieceId: id,
@@ -581,6 +592,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
         blocks: nextBlocks,
         selectedBlockId: id,
         selectedPieceId: id,
+        isCraneAnimating: true,
         lastCraneTransfer: {
           seq: ++craneOpCounter,
           pieceId: id,
@@ -613,6 +625,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
         allowedFloorCells: allowedCells,
         allowedFloorSet: allowedSet,
         lastCraneTransfer: null,
+        isCraneAnimating: false,
         targetShadow: getTargetShadow(fresh).targetShadow,
         targetWallShape: getTargetWallShape(fresh),
         targetFloorShape: getTargetFloorShape(fresh),
@@ -643,6 +656,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
         allowedFloorCells: allowedCells,
         allowedFloorSet: allowedSet,
         lastCraneTransfer: null,
+        isCraneAnimating: false,
         targetShadow: getTargetShadow(fresh).targetShadow,
         targetWallShape: getTargetWallShape(fresh),
         targetFloorShape: getTargetFloorShape(fresh),
@@ -667,6 +681,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
           pieces: lastSnapshot.pieces,
           blocks: lastSnapshot.blocks,
           lastCraneTransfer: null,
+          isCraneAnimating: false,
           history: nextHistory,
           blocksHistory: nextBlocksHistory,
           movesCount: Math.max(0, state.movesCount - 1),
