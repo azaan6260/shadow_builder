@@ -10,7 +10,16 @@ export type ShapeKind =
   | 'cylinder'
   | 'wedge'
   | 'sphere'
-  | 'octahedron';
+  | 'octahedron'
+  | 'pipe-frame';
+
+/**
+ * Returns true if the given block shape is opaque and casts a solar shadow.
+ * The 'pipe-frame' (Open Steel Pipe Cube) is hollow and lets 100% of sunlight pass through!
+ */
+export function doesShapeBlockSun(shape: ShapeKind): boolean {
+  return shape !== 'pipe-frame';
+}
 
 /**
  * 2D silhouette profile cast onto the Vertical Screen (XY) or Ground (XZ)
@@ -511,7 +520,7 @@ export function projectAngledShadow(
   const coords: Array<[number, number]> = [];
 
   for (const block of blocks) {
-    if (!block.visible) continue;
+    if (!block.visible || !doesShapeBlockSun(block.shape)) continue;
     const effY = block.y + 1;
     const shadowX = Number((block.x - ratioX * effY).toFixed(2));
     const shadowZ = Number((block.z - ratioZ * effY).toFixed(2));
@@ -622,15 +631,22 @@ export function isValidPiecePosition(
 
 /**
  * Resolves the best valid `[x, y, z]` landing position when a user clicks or hovers `(targetX, targetZ)`.
- * Supports both direct anchor placement and cantilever placement (where shifting a multi-cell block by
- * `(-dx, -dz)` so it still covers `(targetX, targetZ)` catches a supporting block underneath at `y > 0`).
+ * - Supports placing a horizontal multi-cell block on EITHER the left side (`anchorX = targetX - (w - 1)`)
+ *   OR the right side (`anchorX = targetX`) of a vertical support block!
+ * - `preferLeftX` / `preferBackZ` allow sub-cell pointer aiming (hovering the left half vs right half of a support block)
+ *   to immediately select the left-cantilever or right-cantilever orientation.
+ * - If the block is already sitting at one valid anchor on the clicked column, clicking again automatically
+ *   toggles to the alternate cantilever side (e.g. from right side to left side).
  */
 export function resolveBestPlacementAnchor(
   targetPiece: WallPiece,
   targetX: number,
   targetZ: number,
   pieces: WallPiece[],
-  allowedFloorSet?: Set<string>
+  allowedFloorSet?: Set<string>,
+  preferLeftX = false,
+  preferBackZ = false,
+  avoidCurrentPosition = false
 ): {
   gridPos: [number, number, number];
   settledOthers: WallPiece[];
@@ -651,17 +667,43 @@ export function resolveBestPlacementAnchor(
     Math.max(minZ, Math.min(maxZ, az)),
   ];
 
-  // Candidate anchor offsets that still cover (targetX, targetZ)
-  const candidateAnchors: Array<[number, number]> = [];
+  // Build dx and dz search orders based on whether the user aimed at the left/right or back/front side
+  const dxOrder: number[] = [];
   for (let dx = 0; dx < targetPiece.dims[0]; dx++) {
-    for (let dz = 0; dz < targetPiece.dims[2]; dz++) {
-      candidateAnchors.push(clampAnchor(targetX - dx, targetZ - dz));
+    dxOrder.push(preferLeftX ? targetPiece.dims[0] - 1 - dx : dx);
+  }
+  const dzOrder: number[] = [];
+  for (let dz = 0; dz < targetPiece.dims[2]; dz++) {
+    dzOrder.push(preferBackZ ? targetPiece.dims[2] - 1 - dz : dz);
+  }
+
+  // Candidate anchor offsets that cover (targetX, targetZ)
+  const seenAnchors = new Set<string>();
+  const candidateAnchors: Array<[number, number]> = [];
+  for (const dx of dxOrder) {
+    for (const dz of dzOrder) {
+      const [cx, cz] = clampAnchor(targetX - dx, targetZ - dz);
+      const key = `${cx},${cz}`;
+      if (!seenAnchors.has(key)) {
+        seenAnchors.add(key);
+        candidateAnchors.push([cx, cz]);
+      }
     }
   }
 
-  let fallbackPos: [number, number, number] | null = null;
+  // Check if there is an existing support block at the exact clicked/hovered cell (targetX, targetZ)
+  const hasSupportAtTargetCell = settledOtherBlocks.some(
+    (b) => b.visible && b.x === targetX && b.z === targetZ
+  );
 
-  for (const [cx, cz] of candidateAnchors) {
+  interface EvaluatedCandidate {
+    pos: [number, number, number];
+    isValid: boolean;
+    isCurrentPos: boolean;
+    isElevated: boolean;
+  }
+
+  const evaluated: EvaluatedCandidate[] = candidateAnchors.map(([cx, cz]) => {
     const dropY = calculateGravityDrop(
       cx,
       cz,
@@ -670,9 +712,6 @@ export function resolveBestPlacementAnchor(
       targetPiece.dims
     );
     const pos: [number, number, number] = [cx, dropY, cz];
-    if (!fallbackPos) {
-      fallbackPos = pos;
-    }
 
     const testPieces = pieces.map((p) =>
       p.id === targetPiece.id
@@ -680,21 +719,62 @@ export function resolveBestPlacementAnchor(
         : settledOthers.find((s) => s.id === p.id) ?? p
     );
 
-    if (
-      isValidPiecePosition(
-        testPieces,
-        targetPiece.id,
-        pos,
-        targetPiece.dims,
-        allowedFloorSet
-      )
-    ) {
-      return { gridPos: pos, settledOthers, isValid: true };
+    const isValid = isValidPiecePosition(
+      testPieces,
+      targetPiece.id,
+      pos,
+      targetPiece.dims,
+      allowedFloorSet
+    );
+
+    const isCurrentPos =
+      pos[0] === targetPiece.position[0] &&
+      pos[1] === targetPiece.position[1] &&
+      pos[2] === targetPiece.position[2];
+
+    return {
+      pos,
+      isValid,
+      isCurrentPos,
+      isElevated: dropY > 0,
+    };
+  });
+
+  // 1. Filter to valid candidates
+  const validCandidates = evaluated.filter((c) => c.isValid);
+
+  if (validCandidates.length > 0) {
+    // When clicking/hovering a cell adjacent to a support block (e.g., clicking X = -1 to cantilever left from X = 0),
+    // if one candidate anchor catches the elevated support block (`dropY > 0`) and the clicked cell itself is empty or
+    // we are already elevated, prioritize the elevated cantilever candidate if the user's piece is already elevated or
+    // if the ground cell is a garden!
+    const nonCurrentValid = avoidCurrentPosition
+      ? validCandidates.filter((c) => !c.isCurrentPos)
+      : validCandidates;
+
+    const pool = nonCurrentValid.length > 0 ? nonCurrentValid : validCandidates;
+
+    // If the user clicked an empty cell next to a tower while the selected piece is already stacked (or if the clicked cell
+    // has a block next to it), check if the user is trying to shift a stacked horizontal block to the left/right on the tower:
+    if (!hasSupportAtTargetCell && targetPiece.position[1] > 0) {
+      const elevatedMatch = pool.find((c) => c.isElevated);
+      if (elevatedMatch) {
+        return { gridPos: elevatedMatch.pos, settledOthers, isValid: true };
+      }
     }
+
+    return { gridPos: pool[0].pos, settledOthers, isValid: true };
   }
 
+  const fallbackPos =
+    evaluated[0]?.pos ?? [
+      targetPiece.position[0],
+      targetPiece.position[1],
+      targetPiece.position[2],
+    ];
+
   return {
-    gridPos: fallbackPos ?? [targetPiece.position[0], targetPiece.position[1], targetPiece.position[2]],
+    gridPos: fallbackPos,
     settledOthers,
     isValid: false,
   };
@@ -742,7 +822,7 @@ export function isBalconyShadedByBlocks(
   };
 
   for (const block of centralZoneBlocks) {
-    if (!block.visible) continue;
+    if (!block.visible || !doesShapeBlockSun(block.shape)) continue;
     const minX = block.x - 0.51;
     const maxX = block.x + 0.51;
     const minY = block.y - 0.51;
@@ -1145,15 +1225,28 @@ export const PUZZLE_LEVELS: PuzzleLevel[] = [
       },
       {
         id: 'p1-wedge',
-        name: 'Solar Stepback Wedge (1×1×1)',
-        shape: 'wedge',
+        name: 'Open Pipe Truss (1×1×1 — Sun Passes Through)',
+        shape: 'pipe-frame',
         dims: [1, 1, 1],
         baseDims: [1, 1, 1],
         rotation: [0, 0, 0],
         targetPosition: [0, 0, 0],
         initialPosition: [0, 0, 4],
+        accentColor: '#38bdf8',
+        wallSilhouette: 'rect',
+        floorSilhouette: 'rect',
+      },
+      {
+        id: 'p1-pipe-support',
+        name: 'Hollow Pipe Frame Cube (1×1×1 — Sun Passes Through)',
+        shape: 'pipe-frame',
+        dims: [1, 1, 1],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [-2, 0, 2],
+        initialPosition: [-2, 0, 4],
         accentColor: '#2dd4bf',
-        wallSilhouette: 'triangle',
+        wallSilhouette: 'rect',
         floorSilhouette: 'rect',
       },
     ],
@@ -1309,16 +1402,29 @@ export const PUZZLE_LEVELS: PuzzleLevel[] = [
       },
       {
         id: 'p2-octa',
-        name: 'Faceted Atrium Node (1×1×1)',
-        shape: 'octahedron',
+        name: 'Open Pipe Frame Cube (1×1×1 — Sun Passes Through)',
+        shape: 'pipe-frame',
         dims: [1, 1, 1],
         baseDims: [1, 1, 1],
         rotation: [0, 0, 0],
         targetPosition: [1, 0, 2],
         initialPosition: [2, 0, 4],
-        accentColor: '#e879f9',
-        wallSilhouette: 'diamond',
-        floorSilhouette: 'diamond',
+        accentColor: '#38bdf8',
+        wallSilhouette: 'rect',
+        floorSilhouette: 'rect',
+      },
+      {
+        id: 'p2-pipe-b',
+        name: 'Hollow Pipe Support Cube (1×1×1 — Sun Passes Through)',
+        shape: 'pipe-frame',
+        dims: [1, 1, 1],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [0, 0, 1],
+        initialPosition: [0, 0, 4],
+        accentColor: '#2dd4bf',
+        wallSilhouette: 'rect',
+        floorSilhouette: 'rect',
       },
     ],
   },
@@ -1484,16 +1590,29 @@ export const PUZZLE_LEVELS: PuzzleLevel[] = [
       },
       {
         id: 'p3-sphere',
-        name: 'Skyline Solarium (1×1×1)',
-        shape: 'sphere',
+        name: 'Open Pipe Frame Cube (1×1×1 — Sun Passes Through)',
+        shape: 'pipe-frame',
         dims: [1, 1, 1],
         baseDims: [1, 1, 1],
         rotation: [0, 0, 0],
         targetPosition: [3, 1, 2],
         initialPosition: [2, 0, 4],
         accentColor: '#38bdf8',
-        wallSilhouette: 'circle',
-        floorSilhouette: 'circle',
+        wallSilhouette: 'rect',
+        floorSilhouette: 'rect',
+      },
+      {
+        id: 'p3-pipe-b',
+        name: 'Hollow Pipe Truss Cube (1×1×1 — Sun Passes Through)',
+        shape: 'pipe-frame',
+        dims: [1, 1, 1],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [3, 0, 2],
+        initialPosition: [0, 0, 4],
+        accentColor: '#2dd4bf',
+        wallSilhouette: 'rect',
+        floorSilhouette: 'rect',
       },
     ],
   },
@@ -1677,15 +1796,28 @@ export const PUZZLE_LEVELS: PuzzleLevel[] = [
       },
       {
         id: 'p4-wedge',
-        name: 'East Stepback Wedge (1×1×1)',
-        shape: 'wedge',
+        name: 'Open Pipe Frame Cube (1×1×1 — Sun Passes Through)',
+        shape: 'pipe-frame',
         dims: [1, 1, 1],
         baseDims: [1, 1, 1],
         rotation: [0, 0, 0],
         targetPosition: [3, 0, 1],
         initialPosition: [2, 0, 4],
-        accentColor: '#818cf8',
-        wallSilhouette: 'triangle',
+        accentColor: '#38bdf8',
+        wallSilhouette: 'rect',
+        floorSilhouette: 'rect',
+      },
+      {
+        id: 'p4-pipe-b',
+        name: 'Hollow Pipe Support Cube (1×1×1 — Sun Passes Through)',
+        shape: 'pipe-frame',
+        dims: [1, 1, 1],
+        baseDims: [1, 1, 1],
+        rotation: [0, 0, 0],
+        targetPosition: [-3, 1, 2],
+        initialPosition: [-1, 0, 4],
+        accentColor: '#2dd4bf',
+        wallSilhouette: 'rect',
         floorSilhouette: 'rect',
       },
     ],

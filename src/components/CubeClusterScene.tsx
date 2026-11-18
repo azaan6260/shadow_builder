@@ -24,6 +24,7 @@ import {
   StencilElement,
   WallPiece,
   deriveBlocksFromPieces,
+  doesShapeBlockSun,
   getBalconyOffset,
   getPieceWorldCenter,
   isBalconyShadedByBlocks,
@@ -125,8 +126,27 @@ const SHAPE_GEOMETRIES: Record<
     wedge: build(wedge, 10),
     sphere: build(sphere, 35),
     octahedron: build(octahedron, 10),
+    'pipe-frame': build(cubeSmall, 15),
   };
 })();
+
+const PIPE_EDGE_OFFSETS: Array<[number, number]> = [
+  [-0.42, -0.42],
+  [0.42, -0.42],
+  [-0.42, 0.42],
+  [0.42, 0.42],
+];
+
+const PIPE_CORNER_OFFSETS: Array<[number, number, number]> = [
+  [-0.42, -0.42, -0.42],
+  [0.42, -0.42, -0.42],
+  [-0.42, 0.42, -0.42],
+  [0.42, 0.42, -0.42],
+  [-0.42, -0.42, 0.42],
+  [0.42, -0.42, 0.42],
+  [-0.42, 0.42, 0.42],
+  [0.42, 0.42, 0.42],
+];
 
 const SHARED_CORE_NODE_GEO = new THREE.OctahedronGeometry(0.14, 0);
 const SHARED_CELL_GUIDE_GEO = new THREE.PlaneGeometry(0.96, 0.96);
@@ -1123,6 +1143,7 @@ export interface ShapeMeshProps {
   outerEdgeColor: string;
   onClick: (e: ThreeEvent<MouseEvent>) => void;
   onPointerOver: (e: ThreeEvent<PointerEvent>) => void;
+  onPointerMove?: (e: ThreeEvent<PointerEvent>) => void;
   onPointerOut: (e: ThreeEvent<PointerEvent>) => void;
 }
 
@@ -1137,6 +1158,7 @@ export function ShapeMesh({
   outerEdgeColor,
   onClick,
   onPointerOver,
+  onPointerMove,
   onPointerOut,
 }: ShapeMeshProps) {
   const { geo, edges } = SHAPE_GEOMETRIES[shape];
@@ -1149,6 +1171,7 @@ export function ShapeMesh({
 
   const useDeclarativeGeometry =
     shape === 'cube' || shape === 'prism' || shape === 'pyramid';
+  const isPipeFrame = shape === 'pipe-frame';
 
   // Smoothly animate 3-axis (X, Y, Z) block rotation when the player rotates the block
   const rotSpring = useSpring({
@@ -1156,60 +1179,170 @@ export function ShapeMesh({
     config: { mass: 1.1, tension: 320, friction: 24 },
   });
 
+  const pipeColor = isSelected
+    ? '#38bdf8'
+    : isHovered
+    ? '#0ea5e9'
+    : '#94a3b8';
+  const jointColor = isSelected ? '#0284c7' : '#38bdf8';
+
   return (
     <a.group
       position={animatedPosition as unknown as [number, number, number]}
       rotation={rotSpring.rot as unknown as [number, number, number]}
     >
-      <mesh
-        scale={[spacing, spacing, spacing]}
-        geometry={useDeclarativeGeometry ? undefined : geo}
-        rotation={useDeclarativeGeometry ? meshRotation : [0, 0, 0]}
-        customDepthMaterial={SHARED_CUSTOM_DEPTH_MAT}
-        castShadow={true}
-        receiveShadow={true}
-        onClick={onClick}
-        onPointerOver={onPointerOver}
-        onPointerOut={onPointerOut}
-      >
-        {shape === 'cube' && <boxGeometry args={[1, 1, 1]} />}
-        {shape === 'prism' && <cylinderGeometry args={[0.7, 0.7, 1, 3]} />}
-        {shape === 'pyramid' && <cylinderGeometry args={[0, 0.7, 1, 4]} />}
+      {isPipeFrame ? (
+        <group scale={[spacing, spacing, spacing]}>
+          {/* Invisible Touch/Mouse Hit-Box for Easy Selection & Stacking (Does NOT Cast Shadow) */}
+          <mesh
+            geometry={geo}
+            castShadow={false}
+            receiveShadow={false}
+            onClick={onClick}
+            onPointerOver={onPointerOver}
+            onPointerMove={onPointerMove}
+            onPointerOut={onPointerOut}
+          >
+            <meshBasicMaterial
+              transparent
+              opacity={0.01}
+              depthWrite={false}
+            />
+          </mesh>
 
-        {/* Modular Skyscraper Unit Material (Pre-Cast Concrete / Curtain Glass / Steel Framing) */}
-        <meshPhysicalMaterial
-          color={isSelected ? '#7dd3fc' : theme.glassColor}
-          roughness={0.5}
-          clearcoat={0.28}
-          clearcoatRoughness={0.22}
-          metalness={0.2}
-          reflectivity={0.5}
-          emissive={isSelected ? '#0284c7' : '#000000'}
-          emissiveIntensity={isSelected ? 0.2 : 0}
-        />
+          {/* 4 Vertical Steel Pipes along Y */}
+          {PIPE_EDGE_OFFSETS.map(([px, pz], idx) => (
+            <mesh
+              key={`pipe-y-${idx}`}
+              position={[px, 0, pz]}
+              castShadow={false}
+              receiveShadow={true}
+              raycast={() => null}
+            >
+              <cylinderGeometry args={[0.048, 0.048, 0.86, 10]} />
+              <meshStandardMaterial
+                color={pipeColor}
+                metalness={0.75}
+                roughness={0.25}
+              />
+            </mesh>
+          ))}
 
-        {/* Steel Framing Structural Edges */}
-        <lineSegments
-          geometry={edges}
-          rotation={
-            shape === 'prism'
-              ? [-Math.PI / 2, 0, 0]
-              : shape === 'pyramid'
-              ? [0, -Math.PI / 4, 0]
-              : [0, 0, 0]
-          }
-          raycast={() => null}
+          {/* 4 Horizontal Steel Pipes along X */}
+          {PIPE_EDGE_OFFSETS.map(([py, pz], idx) => (
+            <mesh
+              key={`pipe-x-${idx}`}
+              position={[0, py, pz]}
+              rotation={[0, 0, Math.PI / 2]}
+              castShadow={false}
+              receiveShadow={true}
+              raycast={() => null}
+            >
+              <cylinderGeometry args={[0.048, 0.048, 0.86, 10]} />
+              <meshStandardMaterial
+                color={pipeColor}
+                metalness={0.75}
+                roughness={0.25}
+              />
+            </mesh>
+          ))}
+
+          {/* 4 Horizontal Steel Pipes along Z */}
+          {PIPE_EDGE_OFFSETS.map(([px, py], idx) => (
+            <mesh
+              key={`pipe-z-${idx}`}
+              position={[px, py, 0]}
+              rotation={[Math.PI / 2, 0, 0]}
+              castShadow={false}
+              receiveShadow={true}
+              raycast={() => null}
+            >
+              <cylinderGeometry args={[0.048, 0.048, 0.86, 10]} />
+              <meshStandardMaterial
+                color={pipeColor}
+                metalness={0.75}
+                roughness={0.25}
+              />
+            </mesh>
+          ))}
+
+          {/* 8 Corner Pipe Couplings / Welded Joints */}
+          {PIPE_CORNER_OFFSETS.map(([cx, cy, cz], idx) => (
+            <mesh
+              key={`pipe-joint-${idx}`}
+              position={[cx, cy, cz]}
+              castShadow={false}
+              receiveShadow={true}
+              raycast={() => null}
+            >
+              <sphereGeometry args={[0.068, 10, 10]} />
+              <meshStandardMaterial
+                color={jointColor}
+                metalness={0.65}
+                roughness={0.3}
+              />
+            </mesh>
+          ))}
+        </group>
+      ) : (
+        <mesh
+          scale={[spacing, spacing, spacing]}
+          geometry={useDeclarativeGeometry ? undefined : geo}
+          rotation={useDeclarativeGeometry ? meshRotation : [0, 0, 0]}
+          customDepthMaterial={SHARED_CUSTOM_DEPTH_MAT}
+          castShadow={true}
+          receiveShadow={true}
+          onClick={onClick}
+          onPointerOver={onPointerOver}
+          onPointerMove={onPointerMove}
+          onPointerOut={onPointerOut}
         >
-          <lineBasicMaterial
-            color={outerEdgeColor}
-            transparent={true}
-            opacity={isSelected || isHovered ? 1.0 : 0.8}
+          {shape === 'cube' && <boxGeometry args={[1, 1, 1]} />}
+          {shape === 'prism' && <cylinderGeometry args={[0.7, 0.7, 1, 3]} />}
+          {shape === 'pyramid' && <cylinderGeometry args={[0, 0.7, 1, 4]} />}
+
+          {/* Modular Skyscraper Unit Material (Pre-Cast Concrete / Curtain Glass / Steel Framing) */}
+          <meshPhysicalMaterial
+            color={isSelected ? '#7dd3fc' : theme.glassColor}
+            roughness={0.5}
+            clearcoat={0.28}
+            clearcoatRoughness={0.22}
+            metalness={0.2}
+            reflectivity={0.5}
+            emissive={isSelected ? '#0284c7' : '#000000'}
+            emissiveIntensity={isSelected ? 0.2 : 0}
           />
-        </lineSegments>
-      </mesh>
+
+          {/* Steel Framing Structural Edges */}
+          <lineSegments
+            geometry={edges}
+            rotation={
+              shape === 'prism'
+                ? [-Math.PI / 2, 0, 0]
+                : shape === 'pyramid'
+                ? [0, -Math.PI / 4, 0]
+                : [0, 0, 0]
+            }
+            raycast={() => null}
+          >
+            <lineBasicMaterial
+              color={outerEdgeColor}
+              transparent={true}
+              opacity={isSelected || isHovered ? 1.0 : 0.8}
+            />
+          </lineSegments>
+        </mesh>
+      )}
     </a.group>
   );
 }
+
+type HoveredColumnTarget = [
+  colX: number,
+  colZ: number,
+  preferLeftX?: boolean,
+  preferBackZ?: boolean,
+];
 
 interface MovableShapeMeshProps {
   piece: WallPiece;
@@ -1221,8 +1354,13 @@ interface MovableShapeMeshProps {
   theme: GlassTheme;
   onSelect: (id: string | null) => void;
   onHover: (id: string | null) => void;
-  onHoverColumn: (col: [number, number] | null) => void;
-  onMoveSelectedWithGravity: (targetX: number, targetZ: number) => boolean;
+  onHoverColumn: (col: HoveredColumnTarget | null) => void;
+  onMoveSelectedWithGravity: (
+    targetX: number,
+    targetZ: number,
+    preferLeftX?: boolean,
+    preferBackZ?: boolean
+  ) => boolean;
 }
 
 function MovableShapeMesh({
@@ -1256,9 +1394,11 @@ function MovableShapeMesh({
 
   const resolveClickedColumn = (
     point: THREE.Vector3
-  ): [number, number] => {
-    const rawX = Math.round(point.x / spacing);
-    const rawZ = Math.round(point.z / spacing);
+  ): [number, number, boolean, boolean] => {
+    const exactX = point.x / spacing;
+    const exactZ = point.z / spacing;
+    const rawX = Math.round(exactX);
+    const rawZ = Math.round(exactZ);
     const colX = Math.max(
       piece.position[0],
       Math.min(piece.position[0] + piece.dims[0] - 1, rawX)
@@ -1267,7 +1407,10 @@ function MovableShapeMesh({
       piece.position[2],
       Math.min(piece.position[2] + piece.dims[2] - 1, rawZ)
     );
-    return [colX, colZ];
+    // Sub-cell aiming: if pointer is on the left half of cell colX, prefer extending the block to the LEFT!
+    const preferLeftX = exactX - colX < 0;
+    const preferBackZ = exactZ - colZ < 0;
+    return [colX, colZ, preferLeftX, preferBackZ];
   };
 
   const handleClick = (e: ThreeEvent<MouseEvent>) => {
@@ -1276,8 +1419,13 @@ function MovableShapeMesh({
     e.stopPropagation();
 
     if (selectedPieceId && selectedPieceId !== piece.id) {
-      const [colX, colZ] = resolveClickedColumn(e.point);
-      const moved = onMoveSelectedWithGravity(colX, colZ);
+      const [colX, colZ, preferLeftX, preferBackZ] = resolveClickedColumn(e.point);
+      const moved = onMoveSelectedWithGravity(
+        colX,
+        colZ,
+        preferLeftX,
+        preferBackZ
+      );
       if (moved) {
         onHoverColumn(null);
         return;
@@ -1308,6 +1456,12 @@ function MovableShapeMesh({
           e.stopPropagation();
           onHover(piece.id);
           if (selectedPieceId && selectedPieceId !== piece.id) {
+            onHoverColumn(resolveClickedColumn(e.point));
+          }
+        }}
+        onPointerMove={(e) => {
+          if (selectedPieceId && selectedPieceId !== piece.id) {
+            e.stopPropagation();
             onHoverColumn(resolveClickedColumn(e.point));
           }
         }}
@@ -2024,9 +2178,9 @@ interface DualShadowStageProps {
   floorStencils: StencilElement[];
   spacing: number;
   hasSelectedBlock: boolean;
-  hoveredColumn: [number, number] | null;
+  hoveredColumn: HoveredColumnTarget | null;
   isCandidateValidCantilever: boolean;
-  onHoverColumn: (col: [number, number] | null) => void;
+  onHoverColumn: (col: HoveredColumnTarget | null) => void;
   onClickFloorCell: (targetX: number, targetZ: number) => void;
 }
 
@@ -2433,7 +2587,12 @@ export interface CubeClusterSceneProps {
   onSelectPiece: (id: string | null) => void;
   onNudgePiece: (id: string, delta: [number, number, number]) => void;
   onMovePieceTo: (id: string, newPos: [number, number, number]) => void;
-  onMoveSelectedWithGravity: (targetX: number, targetZ: number) => boolean;
+  onMoveSelectedWithGravity: (
+    targetX: number,
+    targetZ: number,
+    preferLeftX?: boolean,
+    preferBackZ?: boolean
+  ) => boolean;
 }
 
 export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
@@ -2454,7 +2613,7 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
 }) => {
   const controlsRef = useRef<OrbitControlsImpl | null>(null);
   const [hoveredPieceId, setHoveredPieceId] = useState<string | null>(null);
-  const [hoveredColumn, setHoveredColumn] = useState<[number, number] | null>(null);
+  const [hoveredColumn, setHoveredColumn] = useState<HoveredColumnTarget | null>(null);
 
   const theme = GLASS_THEMES[themeId];
   const selectedPiece = useMemo(
@@ -2630,12 +2789,14 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
     });
   }, [selectedPiece, spacing, craneApi]);
 
-  // Calculate live ghost landing position, validity on allowedFloorSet (including cantilever support at y > 0), & grid anchor
+  // Calculate live ghost landing position, validity on allowedFloorSet (including left/right cantilever support at y > 0), & grid anchor
   const candidatePlacement = useMemo(() => {
     if (!selectedPiece) return null;
-    const rawCol = hoveredColumn ?? [
+    const rawCol: HoveredColumnTarget = hoveredColumn ?? [
       selectedPiece.position[0],
       selectedPiece.position[2],
+      false,
+      false,
     ];
 
     const { gridPos, isValid: isValidPad } =
@@ -2644,7 +2805,10 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
         rawCol[0],
         rawCol[1],
         pieces,
-        allowedFloorSet
+        allowedFloorSet,
+        Boolean(rawCol[2]),
+        Boolean(rawCol[3]),
+        hoveredColumn !== null
       );
 
     const worldCenter = getPieceWorldCenter(gridPos, selectedPiece.dims, spacing);
@@ -2783,12 +2947,17 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
       };
     };
 
-    const activePieceShadows = pieces.map((p) =>
-      computePieceShadowFootprint(p.position, p.dims, p.id, p.shape)
-    );
+    // Only opaque blocks cast shadows; 'pipe-frame' cubes let 100% of sunlight pass through!
+    const activePieceShadows = pieces
+      .filter((p) => doesShapeBlockSun(p.shape))
+      .map((p) =>
+        computePieceShadowFootprint(p.position, p.dims, p.id, p.shape)
+      );
 
     const previewShadow =
-      selectedPiece && candidatePlacement
+      selectedPiece &&
+      candidatePlacement &&
+      doesShapeBlockSun(selectedPiece.shape)
         ? computePieceShadowFootprint(
             candidatePlacement.gridPos,
             selectedPiece.dims,

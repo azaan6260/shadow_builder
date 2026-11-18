@@ -106,7 +106,12 @@ interface PuzzleStoreState {
    * `calculateGravityDrop(targetX, targetZ, currentBlocks)` to find `calculatedY = highestY + 1` (or 0),
    * triggers the Tower Crane animation sequence, and deselects it.
    */
-  moveSelectedWithGravity: (targetX: number, targetZ: number) => boolean;
+  moveSelectedWithGravity: (
+    targetX: number,
+    targetZ: number,
+    preferLeftX?: boolean,
+    preferBackZ?: boolean
+  ) => boolean;
 
   /**
    * Moves a piece by a delta [dx, dy, dz] if within bounds and collision-free
@@ -306,7 +311,12 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
       return true;
     },
 
-    moveSelectedWithGravity: (targetX, targetZ) => {
+    moveSelectedWithGravity: (
+      targetX,
+      targetZ,
+      preferLeftX = false,
+      preferBackZ = false
+    ) => {
       const { pieces, selectedBlockId, selectedPieceId, allowedFloorSet } = get();
       const activeId = selectedBlockId ?? selectedPieceId;
       if (!activeId) return false;
@@ -322,7 +332,10 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
           targetX,
           targetZ,
           pieces,
-          allowedFloorSet
+          allowedFloorSet,
+          preferLeftX,
+          preferBackZ,
+          true
         );
 
       // If position didn't change, just deselect

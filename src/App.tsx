@@ -6,7 +6,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import confetti from 'canvas-confetti';
 import {
+  ArrowDown,
+  ArrowLeft,
   ArrowRight,
+  ArrowUp,
   Award,
   CheckCircle2,
   Eye,
@@ -305,8 +308,71 @@ export default function App() {
           </div>
         </nav>
 
-        {/* Zone 3: 3-Axis Block Rotation Controls (Rot X, Rot Y, Rot Z) + Undo & Reset */}
+        {/* Zone 3: 3-Axis Block Rotation Controls (Rot X, Rot Y, Rot Z), Left/Right Shift, Audio, Undo & Reset */}
         <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+          {/* Left / Right / Back / Forward Shift Controls for Sliding Stacked or Cantilevered Blocks */}
+          <div
+            className="flex items-center gap-0.5 px-1 py-0.5 rounded-lg bg-slate-900/90 border border-slate-700/80"
+            title="Slide selected block Left (-X), Right (+X), Back (-Z), or Forward (+Z) on top of support blocks"
+          >
+            <button
+              type="button"
+              data-testid="nudge-left-button"
+              onClick={() => handleNudgeSelected([-1, 0, 0])}
+              disabled={!activeSelectedId}
+              className={`p-1 rounded transition-colors ${
+                activeSelectedId
+                  ? 'bg-emerald-500/20 hover:bg-emerald-500/35 text-emerald-300 border border-emerald-400/40 cursor-pointer'
+                  : 'bg-slate-800/40 text-slate-600 border border-transparent cursor-not-allowed'
+              }`}
+              title="Slide selected block Left (-X)"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              data-testid="nudge-right-button"
+              onClick={() => handleNudgeSelected([1, 0, 0])}
+              disabled={!activeSelectedId}
+              className={`p-1 rounded transition-colors ${
+                activeSelectedId
+                  ? 'bg-emerald-500/20 hover:bg-emerald-500/35 text-emerald-300 border border-emerald-400/40 cursor-pointer'
+                  : 'bg-slate-800/40 text-slate-600 border border-transparent cursor-not-allowed'
+              }`}
+              title="Slide selected block Right (+X)"
+            >
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              data-testid="nudge-back-button"
+              onClick={() => handleNudgeSelected([0, 0, -1])}
+              disabled={!activeSelectedId}
+              className={`p-1 rounded transition-colors hidden sm:inline-flex ${
+                activeSelectedId
+                  ? 'bg-emerald-500/20 hover:bg-emerald-500/35 text-emerald-300 border border-emerald-400/40 cursor-pointer'
+                  : 'bg-slate-800/40 text-slate-600 border border-transparent cursor-not-allowed'
+              }`}
+              title="Slide selected block Back (-Z)"
+            >
+              <ArrowUp className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              data-testid="nudge-forward-button"
+              onClick={() => handleNudgeSelected([0, 0, 1])}
+              disabled={!activeSelectedId}
+              className={`p-1 rounded transition-colors hidden sm:inline-flex ${
+                activeSelectedId
+                  ? 'bg-emerald-500/20 hover:bg-emerald-500/35 text-emerald-300 border border-emerald-400/40 cursor-pointer'
+                  : 'bg-slate-800/40 text-slate-600 border border-transparent cursor-not-allowed'
+              }`}
+              title="Slide selected block Forward (+Z)"
+            >
+              <ArrowDown className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
           {/* 3-Axis Block Rotation Group */}
           <div
             className="flex items-center gap-0.5 sm:gap-1 px-1 py-0.5 rounded-lg bg-slate-900/90 border border-slate-700/80"
