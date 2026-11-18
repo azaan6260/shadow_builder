@@ -188,8 +188,8 @@ export const STAGING_Z_COORDS = [3, 4] as const;
 export const ALL_Z_MAX = 4;
 
 export const GRID_Y_MIN = 0;
-export const GRID_Y_MAX = 5;
-export const GRID_Y_COORDS = [0, 1, 2, 3, 4, 5] as const;
+export const GRID_Y_MAX = 8;
+export const GRID_Y_COORDS = [0, 1, 2, 3, 4, 5, 6, 7, 8] as const;
 
 /**
  * Rotates a piece 90 degrees around the world X, Y, or Z axis:
@@ -296,13 +296,16 @@ export function getBalconyOffset(
 
 /**
  * Returns true if the piece is completely inside the Central Building Zone
- * (x in [-3..3] and z in [-2..2]) and all of its occupied floor cells belong to `allowedFloorSet` (if provided).
+ * (x in [-3..3] and z in [-2..2]).
+ * If the piece is touching the ground (`y === 0`), all of its floor cells must belong to `allowedFloorSet`.
+ * If the piece is stacked or cantilevered on top of another block (`y > 0`), it is not touching the ground
+ * and is allowed to overhang non-buildable grass cells!
  */
 export function isPieceInCentralZone(
   piece: Pick<WallPiece, 'position' | 'dims'>,
   allowedFloorSet?: Set<string>
 ): boolean {
-  const [x, , z] = piece.position;
+  const [x, y, z] = piece.position;
   const [w, , d] = piece.dims;
   const insideBounds =
     x >= GRID_MIN &&
@@ -311,7 +314,7 @@ export function isPieceInCentralZone(
     z + d - 1 <= GRID_Z_MAX;
   if (!insideBounds) return false;
 
-  if (allowedFloorSet && allowedFloorSet.size > 0) {
+  if (y === 0 && allowedFloorSet && allowedFloorSet.size > 0) {
     for (let dx = 0; dx < w; dx++) {
       for (let dz = 0; dz < d; dz++) {
         if (!allowedFloorSet.has(`${x + dx},${z + dz}`)) {
@@ -550,8 +553,9 @@ export function getTargetShadow(
 
 /**
  * Checks if placing `movingPieceId` at `candidatePos` stays within the construction site
- * (X: -3..3, Y: 0..5, Z: -2..4 including the Central Building Zone [-2..2] and Staging Area [3..4]),
- * respects `allowedFloorSet` for any cell inside the Central Building Zone (z <= 2),
+ * (X: -3..3, Y: 0..8, Z: -2..4 including the Central Building Zone [-2..2] and Staging Area [3..4]),
+ * respects `allowedFloorSet` when touching the ground (`candidatePos[1] === 0`) inside the Central Building Zone,
+ * allows cantilever positions (`candidatePos[1] > 0`) overhanging non-buildable grass cells since they do not touch the ground,
  * and does not collide with any other piece.
  */
 export function isValidPiecePosition(
@@ -572,15 +576,22 @@ export function isValidPiecePosition(
     return false;
   }
 
-  // Enforce limited buildable floor spaces inside the Central Building Zone (z in -2..2).
-  // Also prevent a single block from straddling across the Central Zone (z <= 2) and Staging Area (z >= 3).
+  // Prevent a single block from straddling across the Central Zone (z <= 2) and Staging Area (z >= 3).
   const minZ = candidatePos[2];
   const maxZ = candidatePos[2] + dims[2] - 1;
   if (minZ <= GRID_Z_MAX && maxZ > GRID_Z_MAX) {
     return false;
   }
 
-  if (allowedFloorSet && allowedFloorSet.size > 0 && maxZ <= GRID_Z_MAX) {
+  // Enforce limited buildable floor spaces ONLY when the block is touching the ground (candidatePos[1] === 0).
+  // When candidatePos[1] > 0, the block is supported on top of another block (including cantilever positions
+  // overhanging the grass) and is NOT touching the ground, so it is allowed!
+  if (
+    candidatePos[1] === 0 &&
+    allowedFloorSet &&
+    allowedFloorSet.size > 0 &&
+    maxZ <= GRID_Z_MAX
+  ) {
     for (let dx = 0; dx < dims[0]; dx++) {
       for (let dz = 0; dz < dims[2]; dz++) {
         const cx = candidatePos[0] + dx;
@@ -607,6 +618,86 @@ export function isValidPiecePosition(
   }
 
   return true;
+}
+
+/**
+ * Resolves the best valid `[x, y, z]` landing position when a user clicks or hovers `(targetX, targetZ)`.
+ * Supports both direct anchor placement and cantilever placement (where shifting a multi-cell block by
+ * `(-dx, -dz)` so it still covers `(targetX, targetZ)` catches a supporting block underneath at `y > 0`).
+ */
+export function resolveBestPlacementAnchor(
+  targetPiece: WallPiece,
+  targetX: number,
+  targetZ: number,
+  pieces: WallPiece[],
+  allowedFloorSet?: Set<string>
+): {
+  gridPos: [number, number, number];
+  settledOthers: WallPiece[];
+  isValid: boolean;
+} {
+  const otherPieces = pieces.filter((p) => p.id !== targetPiece.id);
+  const settledOthers = settlePiecesWithGravity(otherPieces);
+  const settledOtherBlocks = deriveBlocksFromPieces(settledOthers);
+
+  const isTargetingStaging = targetZ >= STAGING_Z_MIN;
+  const minZ = isTargetingStaging ? STAGING_Z_MIN : GRID_Z_MIN;
+  const maxZ = isTargetingStaging
+    ? ALL_Z_MAX - targetPiece.dims[2] + 1
+    : GRID_Z_MAX - targetPiece.dims[2] + 1;
+
+  const clampAnchor = (ax: number, az: number): [number, number] => [
+    Math.max(GRID_MIN, Math.min(GRID_MAX - targetPiece.dims[0] + 1, ax)),
+    Math.max(minZ, Math.min(maxZ, az)),
+  ];
+
+  // Candidate anchor offsets that still cover (targetX, targetZ)
+  const candidateAnchors: Array<[number, number]> = [];
+  for (let dx = 0; dx < targetPiece.dims[0]; dx++) {
+    for (let dz = 0; dz < targetPiece.dims[2]; dz++) {
+      candidateAnchors.push(clampAnchor(targetX - dx, targetZ - dz));
+    }
+  }
+
+  let fallbackPos: [number, number, number] | null = null;
+
+  for (const [cx, cz] of candidateAnchors) {
+    const dropY = calculateGravityDrop(
+      cx,
+      cz,
+      settledOtherBlocks,
+      targetPiece.id,
+      targetPiece.dims
+    );
+    const pos: [number, number, number] = [cx, dropY, cz];
+    if (!fallbackPos) {
+      fallbackPos = pos;
+    }
+
+    const testPieces = pieces.map((p) =>
+      p.id === targetPiece.id
+        ? { ...p, position: pos }
+        : settledOthers.find((s) => s.id === p.id) ?? p
+    );
+
+    if (
+      isValidPiecePosition(
+        testPieces,
+        targetPiece.id,
+        pos,
+        targetPiece.dims,
+        allowedFloorSet
+      )
+    ) {
+      return { gridPos: pos, settledOthers, isValid: true };
+    }
+  }
+
+  return {
+    gridPos: fallbackPos ?? [targetPiece.position[0], targetPiece.position[1], targetPiece.position[2]],
+    settledOthers,
+    isValid: false,
+  };
 }
 
 /**

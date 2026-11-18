@@ -7,7 +7,6 @@ import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import {
-  ALL_Z_MAX,
   BALCONY_GRID_Z,
   BlockState,
   CAMERA_PRESETS,
@@ -16,26 +15,22 @@ import {
   GlassTheme,
   GlassThemeId,
   GRID_COORDS,
-  GRID_MAX,
-  GRID_MIN,
   GRID_Z_COORDS,
   GRID_Z_MAX,
   GRID_Z_MIN,
   LIGHT_POSITION,
   STAGING_Z_COORDS,
-  STAGING_Z_MIN,
   ShapeKind,
   StencilElement,
   WallPiece,
-  calculateGravityDrop,
   deriveBlocksFromPieces,
   getBalconyOffset,
   getPieceWorldCenter,
   isBalconyShadedByBlocks,
-  isValidPiecePosition,
-  settlePiecesWithGravity,
+  resolveBestPlacementAnchor,
 } from '../types/puzzle';
 import type { CraneTransferOp } from '../store/usePuzzleStore';
+import { soundFX } from '../utils/sound';
 
 // Detect software WebGL once
 export const isSoftwareGl = (() => {
@@ -58,8 +53,8 @@ export const isSoftwareGl = (() => {
 const WALL_Z = -2.56;
 const BALCONY_Z = -2.18;
 const FLOOR_Y = -2.08;
-const CRANE_JIB_Y = 3.85;
-const CRANE_REST_Y = 3.1;
+const CRANE_JIB_Y = 5.65;
+const CRANE_REST_Y = 4.65;
 const CRANE_PIVOT_X = -3.35;
 const CRANE_PIVOT_Z = 0.2;
 
@@ -367,7 +362,7 @@ function TowerCrane({ craneSpring }: TowerCraneProps) {
   const jibLength = 8.8;
   const counterJibLength = 2.6;
   const apexHeight = 1.45;
-  const mastTiers = 8;
+  const mastTiers = 12;
 
   // Derive the slewing Y-rotation angle of the upper crane assembly so local +X points directly at (hookX, hookZ)
   const slewingRotation = to(
@@ -1369,125 +1364,120 @@ function MovableShapeMesh({
 }
 
 /**
- * Restricted Courtyard Garden Cell inside the Central Building Zone (Non-Buildable Setback Cell)
- * Renders a landscaped stone planter bed with lush green lawn turf, manicured shrubs/hedges,
- * colorful flower clusters, and occasional courtyard trees so players clearly see where blocks CANNOT be placed.
+ * Restricted Courtyard Garden Cell inside the Central Building Zone (Non-Buildable Ground Setback Cell)
+ * - Uses a low, flush sunlit grass turf (`height: 0.006`, top at `FLOOR_Y + 0.008`) so real-time WebGL shadows
+ *   and projected shadow silhouettes sit cleanly ON TOP of the grass and are never hidden!
+ * - Clicking or hovering a garden cell while holding a multi-unit block supports cantilever placement
+ *   when the block rests on an adjacent supporting block (`y > 0`, not touching the ground).
  */
 function CourtyardGardenCell({
   x,
   z,
   spacing,
   isHoveredInvalid,
+  isHoveredValidCantilever,
+  hasSelectedBlock,
   onHover,
+  onClickFloorCell,
 }: {
   x: number;
   z: number;
   spacing: number;
   isHoveredInvalid: boolean;
+  isHoveredValidCantilever: boolean;
+  hasSelectedBlock: boolean;
   onHover: (col: [number, number] | null) => void;
+  onClickFloorCell: (targetX: number, targetZ: number) => void;
 }) {
   const seed = Math.abs(x * 19 + z * 37);
-  const hasMiniTree = (x + z) % 2 === 0 && z >= -1;
   const flowerColor =
     seed % 3 === 0 ? '#f43f5e' : seed % 3 === 1 ? '#fbbf24' : '#c084fc';
 
+  const turfColor = isHoveredValidCantilever
+    ? '#34d399'
+    : isHoveredInvalid
+    ? '#ef4444'
+    : '#4ade80';
+
+  const borderColor = isHoveredValidCantilever
+    ? '#059669'
+    : isHoveredInvalid
+    ? '#b91c1c'
+    : '#15803d';
+
   return (
     <group
-      position={[x * spacing, 0.015, z * spacing]}
+      position={[x * spacing, 0.002, z * spacing]}
       scale={[spacing, 1, spacing]}
     >
-      {/* Stone Planter Curb Base */}
+      {/* Low Flush Sunlit Grass Lawn Turf (Shadows render directly on top of this surface) */}
       <mesh
-        position={[0, 0.015, 0]}
+        position={[0, 0.003, 0]}
         receiveShadow={true}
         castShadow={false}
+        onClick={(e) => {
+          if (!hasSelectedBlock || e.delta > 10) return;
+          e.stopPropagation();
+          onClickFloorCell(x, z);
+        }}
         onPointerOver={(e) => {
+          if (!hasSelectedBlock) return;
           e.stopPropagation();
           onHover([x, z]);
         }}
         onPointerOut={(e) => {
+          if (!hasSelectedBlock) return;
           e.stopPropagation();
           onHover(null);
         }}
       >
-        <boxGeometry args={[0.92, 0.04, 0.92]} />
-        <meshStandardMaterial
-          color={isHoveredInvalid ? '#ef4444' : '#15803d'}
-          roughness={0.9}
-        />
-        <Edges
-          scale={1.0}
-          threshold={15}
-          color={isHoveredInvalid ? '#b91c1c' : '#166534'}
-        />
+        <boxGeometry args={[0.92, 0.006, 0.92]} />
+        <meshStandardMaterial color={turfColor} roughness={0.92} />
+        <Edges scale={1.0} threshold={15} color={borderColor} />
       </mesh>
 
-      {/* Manicured Boxwood Hedge / Shrub Mound */}
+      {/* Low Corner Boxwood Shrubs (kept at outer corners so the grass center clearly shows cast shadows) */}
       <mesh
-        position={[-0.22, 0.075, -0.18]}
+        position={[-0.33, 0.028, -0.32]}
         castShadow={false}
         receiveShadow={true}
         raycast={() => null}
       >
-        <sphereGeometry args={[0.14, 10, 10]} />
+        <sphereGeometry args={[0.075, 8, 8]} />
         <meshStandardMaterial color="#16a34a" roughness={0.85} />
       </mesh>
       <mesh
-        position={[0.22, 0.065, 0.2]}
+        position={[0.33, 0.025, 0.32]}
         castShadow={false}
         receiveShadow={true}
         raycast={() => null}
       >
-        <sphereGeometry args={[0.12, 10, 10]} />
+        <sphereGeometry args={[0.068, 8, 8]} />
         <meshStandardMaterial color="#22c55e" roughness={0.85} />
       </mesh>
 
-      {/* Colorful Flower Cluster */}
+      {/* Corner Flower Accent */}
       <mesh
-        position={[0.18, 0.06, -0.2]}
+        position={[0.32, 0.024, -0.32]}
         castShadow={false}
         receiveShadow={false}
         raycast={() => null}
       >
-        <sphereGeometry args={[0.065, 8, 8]} />
+        <sphereGeometry args={[0.045, 8, 8]} />
         <meshStandardMaterial color={flowerColor} roughness={0.6} />
       </mesh>
-
-      {/* Miniature Ornamental Courtyard Tree (low profile so crane clears easily) */}
-      {hasMiniTree && (
-        <group position={[0, 0.03, 0]}>
-          <mesh
-            position={[0, 0.08, 0]}
-            castShadow={false}
-            receiveShadow={false}
-            raycast={() => null}
-          >
-            <cylinderGeometry args={[0.03, 0.04, 0.16, 8]} />
-            <meshStandardMaterial color="#78350f" roughness={0.9} />
-          </mesh>
-          <mesh
-            position={[0, 0.21, 0]}
-            castShadow={false}
-            receiveShadow={true}
-            raycast={() => null}
-          >
-            <coneGeometry args={[0.19, 0.26, 10]} />
-            <meshStandardMaterial color="#15803d" roughness={0.8} />
-          </mesh>
-        </group>
-      )}
     </group>
   );
 }
 
 /**
  * Realistic Surrounding Urban Environment:
- * - Sky backdrop & 9 animated drifting 3D volumetric clouds
+ * - Sky backdrop & 8 animated drifting 3D volumetric clouds
  * - Flock of 12 animated 3D flying birds with flapping wings
  * - Asphalt perimeter avenues with lane markings, zebra crosswalks, sidewalks & streetlamps
  * - 8 animated 3D cars/taxis/vans driving smoothly along the roads
  * - West Botanical Park & East Civic Garden Plaza with lawns, trees, flower beds, benches & fountain
- * - 8 additional surrounding high-rise and mid-rise city buildings
+ * - 8 tall surrounding high-rise and mid-rise city skyline buildings
  */
 function RealisticCityEnvironment() {
   const cloudsRef = useRef<THREE.Group>(null);
@@ -1496,14 +1486,14 @@ function RealisticCityEnvironment() {
 
   const cloudConfigs = useMemo(
     () => [
-      { x: -11, y: 7.4, z: -8.5, scale: 1.15, speed: 0.28 },
-      { x: -4.5, y: 8.1, z: -10.2, scale: 1.35, speed: 0.22 },
-      { x: 3.5, y: 7.6, z: -9.0, scale: 1.05, speed: 0.31 },
-      { x: 10.5, y: 8.3, z: -7.8, scale: 1.25, speed: 0.25 },
-      { x: -9.5, y: 7.9, z: -2.2, scale: 0.95, speed: 0.34 },
-      { x: 9.8, y: 7.5, z: -1.5, scale: 1.1, speed: 0.29 },
-      { x: -7.2, y: 8.4, z: 5.5, scale: 1.2, speed: 0.24 },
-      { x: 6.8, y: 8.0, z: 6.2, scale: 1.0, speed: 0.32 },
+      { x: -11, y: 9.8, z: -8.5, scale: 1.15, speed: 0.28 },
+      { x: -4.5, y: 10.7, z: -10.2, scale: 1.35, speed: 0.22 },
+      { x: 3.5, y: 10.1, z: -9.0, scale: 1.05, speed: 0.31 },
+      { x: 10.5, y: 11.0, z: -7.8, scale: 1.25, speed: 0.25 },
+      { x: -9.5, y: 10.3, z: -2.2, scale: 0.95, speed: 0.34 },
+      { x: 9.8, y: 9.9, z: -1.5, scale: 1.1, speed: 0.29 },
+      { x: -7.2, y: 11.2, z: 5.5, scale: 1.2, speed: 0.24 },
+      { x: 6.8, y: 10.4, z: 6.2, scale: 1.0, speed: 0.32 },
     ],
     []
   );
@@ -1513,7 +1503,7 @@ function RealisticCityEnvironment() {
       Array.from({ length: 12 }).map((_, i) => ({
         radiusX: 5.5 + (i % 4) * 1.4,
         radiusZ: 4.2 + (i % 3) * 1.3,
-        baseY: 4.9 + (i % 5) * 0.45,
+        baseY: 6.8 + (i % 5) * 0.45,
         speed: 0.42 + (i % 4) * 0.07,
         phase: (i * Math.PI) / 6,
         flapSpeed: 10 + (i % 3) * 2.5,
@@ -1541,21 +1531,21 @@ function RealisticCityEnvironment() {
 
   const outerBuildings = useMemo(
     () => [
-      // Northwest High-Rise Glass Tower
-      { x: -7.4, z: -6.8, w: 2.4, h: 6.4, d: 2.2, color: '#334155', accent: '#38bdf8' },
-      // North-Central Civic Tower
-      { x: -3.2, z: -6.9, w: 2.2, h: 5.6, d: 2.0, color: '#1e293b', accent: '#60a5fa' },
-      { x: 3.2, z: -6.9, w: 2.3, h: 5.9, d: 2.0, color: '#334155', accent: '#38bdf8' },
-      // Northeast Modern Skyscraper
-      { x: 7.4, z: -6.8, w: 2.5, h: 6.8, d: 2.2, color: '#1e293b', accent: '#7dd3fc' },
-      // Far West Mid-Rise Terrace Building
-      { x: -10.2, z: -1.8, w: 2.1, h: 4.6, d: 2.6, color: '#475569', accent: '#93c5fd' },
-      // Far East Mid-Rise Office Building
-      { x: 10.2, z: -1.8, w: 2.1, h: 4.9, d: 2.6, color: '#475569', accent: '#38bdf8' },
-      // Southwest Corner Commercial Block
-      { x: -8.6, z: 7.6, w: 2.4, h: 3.6, d: 2.0, color: '#334155', accent: '#fbbf24' },
-      // Southeast Corner Commercial Block
-      { x: 8.6, z: 7.6, w: 2.4, h: 3.8, d: 2.0, color: '#334155', accent: '#34d399' },
+      // Northwest High-Rise Glass Skyscraper
+      { x: -7.4, z: -6.8, w: 2.5, h: 11.4, d: 2.2, color: '#334155', accent: '#38bdf8' },
+      // North-Central Civic Towers
+      { x: -3.2, z: -6.9, w: 2.3, h: 10.2, d: 2.0, color: '#1e293b', accent: '#60a5fa' },
+      { x: 3.2, z: -6.9, w: 2.3, h: 10.6, d: 2.0, color: '#334155', accent: '#38bdf8' },
+      // Northeast Signature Skyscraper
+      { x: 7.4, z: -6.8, w: 2.6, h: 11.8, d: 2.2, color: '#1e293b', accent: '#7dd3fc' },
+      // Far West High-Rise Tower
+      { x: -10.2, z: -1.8, w: 2.2, h: 9.2, d: 2.6, color: '#475569', accent: '#93c5fd' },
+      // Far East High-Rise Office Tower
+      { x: 10.2, z: -1.8, w: 2.2, h: 9.6, d: 2.6, color: '#475569', accent: '#38bdf8' },
+      // Southwest Corner Commercial High-Rise
+      { x: -8.6, z: 7.6, w: 2.5, h: 7.8, d: 2.1, color: '#334155', accent: '#fbbf24' },
+      // Southeast Corner Commercial High-Rise
+      { x: 8.6, z: 7.6, w: 2.5, h: 8.2, d: 2.1, color: '#334155', accent: '#34d399' },
     ],
     []
   );
@@ -1882,23 +1872,23 @@ function RealisticCityEnvironment() {
         {/* West Botanical Park Lawn (x = -7.3, z = 0.3) */}
         <mesh
           rotation={[-Math.PI / 2, 0, 0]}
-          position={[-7.3, 0.005, 0.3]}
+          position={[-7.3, 0.002, 0.3]}
           receiveShadow={true}
           raycast={() => null}
         >
           <planeGeometry args={[3.9, 8.2]} />
-          <meshStandardMaterial color="#15803d" roughness={0.92} />
+          <meshStandardMaterial color="#22c55e" roughness={0.92} />
         </mesh>
 
         {/* East Civic Garden Plaza Lawn (x = 7.3, z = 0.3) */}
         <mesh
           rotation={[-Math.PI / 2, 0, 0]}
-          position={[7.3, 0.005, 0.3]}
+          position={[7.3, 0.002, 0.3]}
           receiveShadow={true}
           raycast={() => null}
         >
           <planeGeometry args={[3.9, 8.2]} />
-          <meshStandardMaterial color="#15803d" roughness={0.92} />
+          <meshStandardMaterial color="#22c55e" roughness={0.92} />
         </mesh>
 
         {/* Circular Park Fountain & Reflecting Pond in West Park */}
@@ -2035,6 +2025,7 @@ interface DualShadowStageProps {
   spacing: number;
   hasSelectedBlock: boolean;
   hoveredColumn: [number, number] | null;
+  isCandidateValidCantilever: boolean;
   onHoverColumn: (col: [number, number] | null) => void;
   onClickFloorCell: (targetX: number, targetZ: number) => void;
 }
@@ -2046,6 +2037,7 @@ function DualShadowStage({
   spacing,
   hasSelectedBlock,
   hoveredColumn,
+  isCandidateValidCantilever,
   onHoverColumn,
   onClickFloorCell,
 }: DualShadowStageProps) {
@@ -2064,44 +2056,112 @@ function DualShadowStage({
       </mesh>
 
       {/* ===================================================================== */}
-      {/* 1. ASYMMETRIC NEIGHBORING BUILDINGS (Dark Slate Concrete) + BALCONIES */}
+      {/* 1. TALL ASYMMETRIC NEIGHBORING BUILDINGS (Dark Slate) + BALCONIES     */}
       {/* ===================================================================== */}
       <group>
-        {/* West Residential Tower (Covers X = -3, -2, -1; front face at WALL_Z) */}
+        {/* West Residential High-Rise Tower (Covers X = -3, -2, -1; height = 10.8 * spacing) */}
         <mesh
-          position={[-2.05 * spacing, 0.35 * spacing, WALL_Z - 0.78]}
+          position={[-2.05 * spacing, 2.35 * spacing, WALL_Z - 0.85]}
           receiveShadow={true}
           castShadow={false}
           raycast={() => null}
         >
-          <boxGeometry args={[3.35 * spacing, 6.8 * spacing, 1.56]} />
+          <boxGeometry args={[3.35 * spacing, 10.8 * spacing, 1.7]} />
           <meshStandardMaterial color="#334155" roughness={0.86} metalness={0.08} />
           <Edges scale={1.0} threshold={15} color="#0f172a" />
         </mesh>
 
-        {/* Central Stepped Loft Building (Covers X = 0; front face at WALL_Z) */}
+        {/* West Tower Upper Penthouse Crown & Illuminated Sky-Loft Window Bands */}
         <mesh
-          position={[0, 0.05 * spacing, WALL_Z - 0.82]}
+          position={[-2.05 * spacing, 8.05 * spacing, WALL_Z - 0.85]}
           receiveShadow={true}
           castShadow={false}
           raycast={() => null}
         >
-          <boxGeometry args={[1.18 * spacing, 6.1 * spacing, 1.64]} />
+          <boxGeometry args={[2.55 * spacing, 0.65 * spacing, 1.3]} />
+          <meshStandardMaterial color="#1e293b" roughness={0.8} metalness={0.15} />
+          <Edges scale={1.0} threshold={15} color="#0f172a" />
+        </mesh>
+
+        {/* Central Stepped Loft High-Rise (Covers X = 0; height = 9.6 * spacing) */}
+        <mesh
+          position={[0, 1.75 * spacing, WALL_Z - 0.88]}
+          receiveShadow={true}
+          castShadow={false}
+          raycast={() => null}
+        >
+          <boxGeometry args={[1.18 * spacing, 9.6 * spacing, 1.76]} />
           <meshStandardMaterial color="#273244" roughness={0.88} metalness={0.06} />
           <Edges scale={1.0} threshold={15} color="#0f172a" />
         </mesh>
 
-        {/* East Terrace Tower (Covers X = 1, 2, 3; front face at WALL_Z) */}
+        {/* Central Tower Crown */}
         <mesh
-          position={[2.05 * spacing, 0.25 * spacing, WALL_Z - 0.78]}
+          position={[0, 6.85 * spacing, WALL_Z - 0.88]}
           receiveShadow={true}
           castShadow={false}
           raycast={() => null}
         >
-          <boxGeometry args={[3.35 * spacing, 6.5 * spacing, 1.56]} />
+          <boxGeometry args={[0.88 * spacing, 0.55 * spacing, 1.35]} />
+          <meshStandardMaterial color="#1e293b" roughness={0.8} metalness={0.15} />
+          <Edges scale={1.0} threshold={15} color="#0f172a" />
+        </mesh>
+
+        {/* East Terrace High-Rise Tower (Covers X = 1, 2, 3; height = 10.4 * spacing) */}
+        <mesh
+          position={[2.05 * spacing, 2.15 * spacing, WALL_Z - 0.85]}
+          receiveShadow={true}
+          castShadow={false}
+          raycast={() => null}
+        >
+          <boxGeometry args={[3.35 * spacing, 10.4 * spacing, 1.7]} />
           <meshStandardMaterial color="#334155" roughness={0.86} metalness={0.08} />
           <Edges scale={1.0} threshold={15} color="#0f172a" />
         </mesh>
+
+        {/* East Tower Upper Penthouse Crown */}
+        <mesh
+          position={[2.05 * spacing, 7.65 * spacing, WALL_Z - 0.85]}
+          receiveShadow={true}
+          castShadow={false}
+          raycast={() => null}
+        >
+          <boxGeometry args={[2.55 * spacing, 0.65 * spacing, 1.3]} />
+          <meshStandardMaterial color="#1e293b" roughness={0.8} metalness={0.15} />
+          <Edges scale={1.0} threshold={15} color="#0f172a" />
+        </mesh>
+
+        {/* Upper-Story Architectural Glass Clerestory Bands on the Taller Neighboring Towers */}
+        {[4.2, 5.1, 6.0, 6.9].map((bandY, bIdx) => (
+          <React.Fragment key={`upper-band-${bIdx}`}>
+            <mesh
+              position={[-2.05 * spacing, bandY * spacing, WALL_Z + 0.008]}
+              raycast={() => null}
+            >
+              <planeGeometry args={[2.95 * spacing, 0.22 * spacing]} />
+              <meshStandardMaterial
+                color="#38bdf8"
+                emissive="#0284c7"
+                emissiveIntensity={0.28}
+                roughness={0.2}
+                metalness={0.7}
+              />
+            </mesh>
+            <mesh
+              position={[2.05 * spacing, (bandY - 0.15) * spacing, WALL_Z + 0.008]}
+              raycast={() => null}
+            >
+              <planeGeometry args={[2.95 * spacing, 0.22 * spacing]} />
+              <meshStandardMaterial
+                color="#38bdf8"
+                emissive="#0284c7"
+                emissiveIntensity={0.28}
+                roughness={0.2}
+                metalness={0.7}
+              />
+            </mesh>
+          </React.Fragment>
+        ))}
 
         {/* Irregularly Arranged 3D Balconies with Multiple Standing Residents */}
         {windowCoordinates.map(([wx, wy]) => {
@@ -2118,15 +2178,15 @@ function DualShadowStage({
           );
         })}
 
-        {/* Prominent Shadow Overlay Receiver Plane across the Neighboring Building Facades */}
+        {/* Prominent Shadow Overlay Receiver Plane across the Full Height of the Neighboring Building Facades */}
         <mesh
-          position={[0, 0.25 * spacing, WALL_Z + 0.015]}
+          position={[0, 2.35 * spacing, WALL_Z + 0.015]}
           receiveShadow={true}
           castShadow={false}
           raycast={() => null}
         >
-          <planeGeometry args={[8.2 * spacing, 6.8 * spacing]} />
-          <shadowMaterial color="#020617" transparent opacity={0.76} />
+          <planeGeometry args={[8.2 * spacing, 10.8 * spacing]} />
+          <shadowMaterial color="#020617" transparent opacity={0.82} />
         </mesh>
       </group>
 
@@ -2163,8 +2223,19 @@ function DualShadowStage({
                   x={x}
                   z={z}
                   spacing={spacing}
-                  isHoveredInvalid={isHoveredCell && hasSelectedBlock}
+                  isHoveredInvalid={
+                    isHoveredCell &&
+                    hasSelectedBlock &&
+                    !isCandidateValidCantilever
+                  }
+                  isHoveredValidCantilever={
+                    isHoveredCell &&
+                    hasSelectedBlock &&
+                    isCandidateValidCantilever
+                  }
+                  hasSelectedBlock={hasSelectedBlock}
                   onHover={onHoverColumn}
+                  onClickFloorCell={onClickFloorCell}
                 />
               );
             }
@@ -2328,16 +2399,16 @@ function DualShadowStage({
           })
         )}
 
-        {/* Prominent Shadow Overlay Receiver Plane on the Ground */}
+        {/* Prominent Real-Time Shadow Receiver Plane on Top of Both Concrete Pads AND Courtyard Grass */}
         <mesh
           rotation={[-Math.PI / 2, 0, 0]}
-          position={[0, 0.018, 0.6 * spacing]}
+          position={[0, 0.019, 0.4 * spacing]}
           receiveShadow={true}
           castShadow={false}
           raycast={() => null}
         >
-          <planeGeometry args={[16, 14]} />
-          <shadowMaterial color="#020617" transparent opacity={0.78} />
+          <planeGeometry args={[24, 20]} />
+          <shadowMaterial color="#020617" transparent opacity={0.82} />
         </mesh>
       </group>
     </group>
@@ -2455,6 +2526,7 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
           if (movedHorizontally) {
             // Step A: Tower Crane rotates its jib & slides its trolley to hover over the block at `fromCenter`
             // (The block remains 100% stationary at `fromCenter`!)
+            soundFX.playCraneSlew(0.32);
             await next({
               hookX: fromCenter[0],
               hookZ: fromCenter[2],
@@ -2465,6 +2537,7 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
 
             // Step B: Tower Crane hook drops down to latch onto the top of the block at `fromCenter`
             // (The block still remains 100% stationary at `fromCenter`!)
+            soundFX.playCraneWinch('down', 0.26);
             await next({
               hookX: fromCenter[0],
               hookZ: fromCenter[2],
@@ -2474,6 +2547,7 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
             });
 
             // Step C: Attach block and hoist BOTH the hook and the block UP together in lockstep
+            soundFX.playCraneWinch('up', 0.3);
             await next({
               hookX: fromCenter[0],
               hookZ: fromCenter[2],
@@ -2483,6 +2557,7 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
             });
 
             // Step D: Tower Crane slews & trolleys horizontally WITH the attached block in 100% lockstep
+            soundFX.playCraneSlew(0.38);
             await next({
               hookX: toCenter[0],
               hookZ: toCenter[2],
@@ -2492,6 +2567,7 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
             });
           } else {
             // Vertical-only nudge: crane hovers over block, lowers hook, and adjusts height together
+            soundFX.playCraneWinch('down', 0.24);
             await next({
               hookX: fromCenter[0],
               hookZ: fromCenter[2],
@@ -2502,6 +2578,7 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
           }
 
           // Step E (Part 1): Lower hook + attached block together to gravity-settled `toCenter`
+          soundFX.playCraneWinch('down', 0.28);
           await next({
             hookX: toCenter[0],
             hookZ: toCenter[2],
@@ -2510,7 +2587,11 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
             config: { mass: 2, tension: 300, friction: 20 },
           });
 
+          // Heavy structural landing thud & grapple release when block settles into place
+          soundFX.playCraneDropThud();
+
           // Step E (Part 2): Detach block at `toCenter` and retract hook up to CRANE_REST_Y
+          soundFX.playCraneWinch('up', 0.24);
           await next({
             hookX: toCenter[0],
             hookZ: toCenter[2],
@@ -2537,6 +2618,7 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
       selectedPiece.dims,
       spacing
     );
+    soundFX.playCraneSlew(0.24);
     craneApi.start({
       hookX: center[0],
       hookZ: center[2],
@@ -2548,54 +2630,30 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
     });
   }, [selectedPiece, spacing, craneApi]);
 
-  // Calculate live ghost landing position, validity on allowedFloorSet, & grid anchor when a block is selected
+  // Calculate live ghost landing position, validity on allowedFloorSet (including cantilever support at y > 0), & grid anchor
   const candidatePlacement = useMemo(() => {
     if (!selectedPiece) return null;
     const rawCol = hoveredColumn ?? [
       selectedPiece.position[0],
       selectedPiece.position[2],
     ];
-    const clampedX = Math.max(
-      GRID_MIN,
-      Math.min(GRID_MAX - selectedPiece.dims[0] + 1, rawCol[0])
-    );
-    const isTargetingStaging = rawCol[1] >= STAGING_Z_MIN;
-    const minZ = isTargetingStaging ? STAGING_Z_MIN : GRID_Z_MIN;
-    const maxZ = isTargetingStaging
-      ? ALL_Z_MAX - selectedPiece.dims[2] + 1
-      : GRID_Z_MAX - selectedPiece.dims[2] + 1;
-    const clampedZ = Math.max(minZ, Math.min(maxZ, rawCol[1]));
 
-    const otherPieces = pieces.filter((p) => p.id !== selectedPiece.id);
-    const settledOthers = settlePiecesWithGravity(otherPieces);
-    const settledOtherBlocks = deriveBlocksFromPieces(settledOthers);
-    const dropY = calculateGravityDrop(
-      clampedX,
-      clampedZ,
-      settledOtherBlocks,
-      selectedPiece.id,
-      selectedPiece.dims
-    );
-    const gridPos: [number, number, number] = [clampedX, dropY, clampedZ];
+    const { gridPos, isValid: isValidPad } =
+      resolveBestPlacementAnchor(
+        selectedPiece,
+        rawCol[0],
+        rawCol[1],
+        pieces,
+        allowedFloorSet
+      );
+
     const worldCenter = getPieceWorldCenter(gridPos, selectedPiece.dims, spacing);
-
-    const candidatePieces = pieces.map((p) =>
-      p.id === selectedPiece.id
-        ? { ...p, position: gridPos }
-        : settledOthers.find((s) => s.id === p.id) ?? p
-    );
-    const isValidPad = isValidPiecePosition(
-      candidatePieces,
-      selectedPiece.id,
-      gridPos,
-      selectedPiece.dims,
-      allowedFloorSet
-    );
 
     return {
       gridPos,
       worldCenter,
       isValidPad,
+      isCantilevered: isValidPad && gridPos[1] > 0,
       isHoveringNewColumn: hoveredColumn !== null,
     };
   }, [selectedPiece, hoveredColumn, pieces, allowedFloorSet, spacing]);
@@ -2843,6 +2901,9 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
           spacing={spacing}
           hasSelectedBlock={selectedPieceId !== null}
           hoveredColumn={hoveredColumn}
+          isCandidateValidCantilever={Boolean(
+            candidatePlacement?.isCantilevered
+          )}
           onHoverColumn={setHoveredColumn}
           onClickFloorCell={(targetX, targetZ) => {
             onMoveSelectedWithGravity(targetX, targetZ);
@@ -2918,14 +2979,14 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
             })
           )}
 
-          {/* 3. Prominent Projected Shadow Mesh Grids on the Floor for Every Placed Block */}
+          {/* 3. Realistic Dark Cast Shadows on the Floor & Grass for Every Placed Block */}
           {projectedShadowData.activePieceShadows.map((item) => {
             const isSelectedBlock = item.pieceId === selectedPieceId;
             return (
               <group key={`cast-shadow-grid-${item.pieceId}`}>
-                {/* Projected Floor Shadow Mesh Grid */}
+                {/* Realistic Dark Shadow Footprint (Rendered at FLOOR_Y + 0.021, clearly on top of grass & concrete) */}
                 <group
-                  position={[item.centerX, FLOOR_Y + 0.015, item.centerZ]}
+                  position={[item.centerX, FLOOR_Y + 0.021, item.centerZ]}
                   scale={[item.widthX, 1, item.depthZ]}
                 >
                   <mesh
@@ -2936,14 +2997,14 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
                     raycast={() => null}
                   >
                     <meshBasicMaterial
-                      color={item.shadesBalcony ? '#ef4444' : '#0284c7'}
+                      color={item.shadesBalcony ? '#450a0a' : '#090d16'}
                       transparent
                       opacity={
                         item.shadesBalcony
-                          ? 0.28
+                          ? 0.68
                           : isSelectedBlock
-                          ? 0.22
-                          : 0.15
+                          ? 0.62
+                          : 0.54
                       }
                       depthWrite={false}
                     />
@@ -2953,14 +3014,14 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
                     raycast={() => null}
                   >
                     <lineBasicMaterial
-                      color={item.shadesBalcony ? '#dc2626' : '#0369a1'}
+                      color={item.shadesBalcony ? '#ef4444' : '#020617'}
                       transparent
                       opacity={
                         item.shadesBalcony
-                          ? 0.88
+                          ? 0.85
                           : isSelectedBlock
-                          ? 0.78
-                          : 0.55
+                          ? 0.68
+                          : 0.45
                       }
                     />
                   </lineSegments>
@@ -2969,14 +3030,14 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
                 {/* Subtle 40° Solar Ray Trajectory Lines for Placed Blocks */}
                 <lineSegments geometry={item.rayGeo} raycast={() => null}>
                   <lineBasicMaterial
-                    color={item.shadesBalcony ? '#ef4444' : '#38bdf8'}
+                    color={item.shadesBalcony ? '#ef4444' : '#334155'}
                     transparent
                     opacity={
                       item.shadesBalcony
                         ? 0.62
                         : isSelectedBlock
-                        ? 0.55
-                        : 0.26
+                        ? 0.5
+                        : 0.22
                     }
                   />
                 </lineSegments>

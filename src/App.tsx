@@ -13,6 +13,8 @@ import {
   Rotate3d,
   RotateCcw,
   Undo2,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
 import {
   CameraPresetId,
@@ -58,8 +60,24 @@ export default function App() {
   const [themeId] = useState<GlassThemeId>('cyan');
   const [dragPlaneMode] = useState<'XY' | 'XZ'>('XY');
   const [activeCameraPreset, setActiveCameraPreset] = useState<CameraPresetId | null>('iso-ne');
+  const [isMuted, setIsMuted] = useState<boolean>(soundFX.isMuted);
 
   const solvedCelebratedRef = useRef<string | null>(null);
+
+  // Subscribe to CityAudioManager mute state & unlock ambient cityscape audio on first user interaction
+  useEffect(() => {
+    const unsub = soundFX.subscribe(setIsMuted);
+    const unlockAudio = () => {
+      soundFX.ensureAmbientStarted();
+    };
+    window.addEventListener('pointerdown', unlockAudio, { passive: true });
+    window.addEventListener('keydown', unlockAudio);
+    return () => {
+      unsub();
+      window.removeEventListener('pointerdown', unlockAudio);
+      window.removeEventListener('keydown', unlockAudio);
+    };
+  }, []);
 
   const activeLevel = useMemo(
     () => PUZZLE_LEVELS.find((l) => l.id === activeLevelId) ?? PUZZLE_LEVELS[0],
@@ -209,6 +227,8 @@ export default function App() {
         undo();
       } else if (e.key === 'r' || e.key === 'R') {
         resetLevel();
+      } else if (e.key === 'm' || e.key === 'M') {
+        soundFX.toggleMute();
       }
     };
     window.addEventListener('keydown', onKeyDown);
@@ -306,6 +326,32 @@ export default function App() {
               </button>
             ))}
           </div>
+
+          <button
+            type="button"
+            data-testid="mute-toggle-button"
+            onClick={() => soundFX.toggleMute()}
+            aria-label={isMuted ? 'Unmute City & Crane Audio' : 'Mute City & Crane Audio'}
+            className={`flex items-center gap-1 px-2 sm:px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+              isMuted
+                ? 'bg-slate-900/80 hover:bg-slate-800 text-slate-400 border-slate-700/80'
+                : 'bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border-emerald-500/40'
+            }`}
+            title={
+              isMuted
+                ? 'Unmute City Ambience & Crane Audio (Shortcut: M)'
+                : 'Mute City Ambience & Crane Audio (Shortcut: M)'
+            }
+          >
+            {isMuted ? (
+              <VolumeX className="w-3.5 h-3.5 text-rose-400" />
+            ) : (
+              <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
+            )}
+            <span className="hidden md:inline">
+              {isMuted ? 'Muted' : 'Audio On'}
+            </span>
+          </button>
 
           <button
             type="button"

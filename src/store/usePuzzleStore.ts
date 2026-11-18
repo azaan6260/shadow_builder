@@ -15,6 +15,7 @@ import {
   getTargetShadow,
   getTargetWallShape,
   isValidPiecePosition,
+  resolveBestPlacementAnchor,
   rotatePieceByAxis,
   settlePiecesWithGravity,
 } from '../types/puzzle';
@@ -315,38 +316,14 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
 
       const fromPos: [number, number, number] = [...target.position];
 
-      // Clamp targetX inside [-3..+3] and targetZ inside [-2..ALL_Z_MAX]
-      // Avoid straddling the boundary between Central Zone (z <= 2) and Staging Area (z >= 3)
-      const clampedX = Math.max(
-        GRID_MIN,
-        Math.min(GRID_MAX - target.dims[0] + 1, targetX)
-      );
-      const isTargetingStaging = targetZ >= STAGING_Z_MIN;
-      const minZ = isTargetingStaging ? STAGING_Z_MIN : GRID_Z_MIN;
-      const maxZ = isTargetingStaging
-        ? ALL_Z_MAX - target.dims[2] + 1
-        : GRID_Z_MAX - target.dims[2] + 1;
-      const clampedZ = Math.max(minZ, Math.min(maxZ, targetZ));
-
-      // First settle any remaining pieces as if `activeId` was lifted out
-      const otherPieces = pieces.filter((p) => p.id !== activeId);
-      const settledOthers = settlePiecesWithGravity(otherPieces);
-      const settledOtherBlocks = deriveBlocksFromPieces(settledOthers);
-
-      // Calculate deterministic gravity drop Y at (clampedX, clampedZ)
-      const calculatedY = calculateGravityDrop(
-        clampedX,
-        clampedZ,
-        settledOtherBlocks,
-        activeId,
-        target.dims
-      );
-
-      const candidatePos: [number, number, number] = [
-        clampedX,
-        calculatedY,
-        clampedZ,
-      ];
+      const { gridPos: candidatePos, isValid, settledOthers } =
+        resolveBestPlacementAnchor(
+          target,
+          targetX,
+          targetZ,
+          pieces,
+          allowedFloorSet
+        );
 
       // If position didn't change, just deselect
       if (
@@ -358,6 +335,10 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
         return false;
       }
 
+      if (!isValid) {
+        return false;
+      }
+
       const candidatePieces = pieces.map((p) => {
         if (p.id === activeId) {
           return { ...p, position: candidatePos };
@@ -365,22 +346,11 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
         return settledOthers.find((s) => s.id === p.id) ?? p;
       });
 
-      if (
-        !isValidPiecePosition(
-          candidatePieces,
-          activeId,
-          candidatePos,
-          target.dims,
-          allowedFloorSet
-        )
-      ) {
-        return false;
-      }
-
       const nextPieces = settlePiecesWithGravity(candidatePieces);
       const nextBlocks = deriveBlocksFromPieces(nextPieces);
 
       const isNowInCentralZone = candidatePos[2] <= GRID_Z_MAX;
+      const calculatedY = candidatePos[1];
 
       soundFX.playToggle(isNowInCentralZone, [
         Math.sign(candidatePos[0]),
@@ -406,7 +376,10 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
         ],
         blocksHistory: [...state.blocksHistory.slice(-49), state.blocks],
         movesCount: state.movesCount + 1,
-        lastMoveInfo: `Crane placed ${target.name.split(' (')[0]} at [${candidatePos.join(', ')}] (y=${calculatedY})`,
+        lastMoveInfo:
+          calculatedY > 0
+            ? `Crane cantilevered ${target.name.split(' (')[0]} at [${candidatePos.join(', ')}] (y=${calculatedY})`
+            : `Crane placed ${target.name.split(' (')[0]} at [${candidatePos.join(', ')}] (y=${calculatedY})`,
       }));
       return true;
     },
