@@ -21,9 +21,55 @@ class CityAudioManager {
 
   public enabled = true;
   public isMuted = false;
+  private lifecycleBound = false;
+
+  private bindLifecycleListeners(): void {
+    if (this.lifecycleBound || typeof window === 'undefined') return;
+    this.lifecycleBound = true;
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        this.pauseForBackground();
+      } else {
+        this.resumeFromBackground();
+      }
+    });
+
+    window.addEventListener('pagehide', () => {
+      this.pauseForBackground();
+    });
+
+    window.addEventListener('beforeunload', () => {
+      this.pauseForBackground();
+    });
+  }
+
+  /**
+   * Immediately suspends the Web Audio context and halts timers when the app is closed or backgrounded
+   */
+  public pauseForBackground(): void {
+    this.stopBirdScheduler();
+    if (this.ctx && this.ctx.state === 'running') {
+      this.ctx.suspend().catch(() => {});
+    }
+  }
+
+  /**
+   * Resumes audio when the app returns to the foreground (if not muted by the user)
+   */
+  public resumeFromBackground(): void {
+    if (this.isMuted) return;
+    if (this.ctx && this.ctx.state === 'suspended') {
+      this.ctx.resume().catch(() => {});
+    }
+    if (this.isAmbientRunning) {
+      this.startBirdScheduler();
+    }
+  }
 
   private getContext(): AudioContext | null {
     if (typeof window === 'undefined') return null;
+    this.bindLifecycleListeners();
     if (!this.ctx) {
       const AudioCtx =
         window.AudioContext ||
@@ -44,7 +90,13 @@ class CityAudioManager {
         this.sfxGain.connect(this.masterGain);
       }
     }
-    if (this.ctx && this.ctx.state === 'suspended' && !this.isMuted) {
+    if (
+      this.ctx &&
+      this.ctx.state === 'suspended' &&
+      !this.isMuted &&
+      typeof document !== 'undefined' &&
+      !document.hidden
+    ) {
       this.ctx.resume().catch(() => {});
     }
     return this.ctx;

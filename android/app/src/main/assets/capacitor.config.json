@@ -2,7 +2,6 @@
 	"appId": "com.prismgrid.app",
 	"appName": "PrismGrid 3D",
 	"webDir": "dist",
-	"bundledWebRuntime": false,
 	"backgroundColor": "#090d16",
 	"android": {
 		"allowMixedContent": true,

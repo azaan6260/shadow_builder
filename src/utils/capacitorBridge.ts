@@ -7,7 +7,8 @@ import { StatusBar, Style } from '@capacitor/status-bar';
 /**
  * Native Capacitor Mobile Bridge for Android & iOS
  * - Configures StatusBar and hides SplashScreen when running natively
- * - Provides hardware back-button handling on Android (deselects active block or triggers undo)
+ * - Closes the app completely via `CapApp.exitApp()` when pressing the Android hardware back button
+ * - Suspends/resumes background audio when the app is paused, backgrounded, or exited
  * - Triggers native tactile Haptics for crane drops, block selection, rotation, and level completion
  */
 class NativeMobileBridge {
@@ -29,7 +30,10 @@ class NativeMobileBridge {
     }
   }
 
-  public async initNativeShell(onBackAction?: () => boolean): Promise<void> {
+  public async initNativeShell(callbacks?: {
+    onPauseAudio?: () => void;
+    onResumeAudio?: () => void;
+  }): Promise<void> {
     if (this.initialized) return;
     this.initialized = true;
 
@@ -51,16 +55,30 @@ class NativeMobileBridge {
     }
 
     try {
-      CapApp.addListener('backButton', ({ canGoBack }) => {
-        if (onBackAction && onBackAction()) {
-          return;
-        }
-        if (!canGoBack) {
-          CapApp.minimizeApp().catch(() => {});
+      // Close the app immediately when the user presses the Android hardware Back button
+      await CapApp.addListener('backButton', () => {
+        callbacks?.onPauseAudio?.();
+        CapApp.exitApp().catch(() => {});
+      });
+
+      // Suspend/resume audio whenever the app moves to background or foreground
+      await CapApp.addListener('appStateChange', ({ isActive }) => {
+        if (isActive) {
+          callbacks?.onResumeAudio?.();
+        } else {
+          callbacks?.onPauseAudio?.();
         }
       });
+
+      await CapApp.addListener('pause', () => {
+        callbacks?.onPauseAudio?.();
+      });
+
+      await CapApp.addListener('resume', () => {
+        callbacks?.onResumeAudio?.();
+      });
     } catch {
-      // Ignore on web/iOS
+      // Ignore on web
     }
   }
 

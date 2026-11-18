@@ -67,17 +67,9 @@ export default function App() {
 
   // Subscribe to CityAudioManager mute state, initialize Capacitor native shell, & unlock ambient cityscape audio
   useEffect(() => {
-    void mobileBridge.initNativeShell(() => {
-      const state = usePuzzleStore.getState();
-      if (state.selectedBlockId || state.selectedPieceId) {
-        state.selectPiece(null);
-        return true;
-      }
-      if (state.history.length > 0) {
-        state.undo();
-        return true;
-      }
-      return false;
+    void mobileBridge.initNativeShell({
+      onPauseAudio: () => soundFX.pauseForBackground(),
+      onResumeAudio: () => soundFX.resumeFromBackground(),
     });
 
     const unsub = soundFX.subscribe(setIsMuted);
