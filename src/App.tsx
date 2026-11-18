@@ -28,6 +28,7 @@ import {
 } from './types/puzzle';
 import { CubeClusterScene } from './components/CubeClusterScene';
 import { usePuzzleStore } from './store/usePuzzleStore';
+import { mobileBridge } from './utils/capacitorBridge';
 import { soundFX } from './utils/sound';
 
 export default function App() {
@@ -64,8 +65,21 @@ export default function App() {
 
   const solvedCelebratedRef = useRef<string | null>(null);
 
-  // Subscribe to CityAudioManager mute state & unlock ambient cityscape audio on first user interaction
+  // Subscribe to CityAudioManager mute state, initialize Capacitor native shell, & unlock ambient cityscape audio
   useEffect(() => {
+    void mobileBridge.initNativeShell(() => {
+      const state = usePuzzleStore.getState();
+      if (state.selectedBlockId || state.selectedPieceId) {
+        state.selectPiece(null);
+        return true;
+      }
+      if (state.history.length > 0) {
+        state.undo();
+        return true;
+      }
+      return false;
+    });
+
     const unsub = soundFX.subscribe(setIsMuted);
     const unlockAudio = () => {
       soundFX.ensureAmbientStarted();

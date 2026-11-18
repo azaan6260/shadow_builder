@@ -4,6 +4,8 @@
 // 2. Mechanical Tower Crane Audio (slewing jib motor, hoist cable winch, heavy structural drop thud & grapple release)
 // 3. Tactile UI & 3-Axis Rotation Servo Feedback with global Mute / Unmute toggle
 
+import { mobileBridge } from './capacitorBridge';
+
 type MuteListener = (muted: boolean) => void;
 
 class CityAudioManager {
@@ -353,6 +355,7 @@ class CityAudioManager {
    * Heavy Structural Block Landing Thud & Grapple Unlatch (Step E)
    */
   public playCraneDropThud(): void {
+    void mobileBridge.impactHeavy();
     this.ensureAmbientStarted();
     if (this.isMuted) return;
     const ctx = this.getContext();
@@ -397,6 +400,7 @@ class CityAudioManager {
     isVisibleNow: boolean,
     coords: [number, number, number]
   ): void {
+    void mobileBridge.impactMedium();
     this.ensureAmbientStarted();
     if (this.isMuted) return;
     const ctx = this.getContext();
@@ -438,6 +442,7 @@ class CityAudioManager {
   }
 
   public playHover(): void {
+    void mobileBridge.impactLight();
     this.ensureAmbientStarted();
     if (this.isMuted) return;
     const ctx = this.getContext();
@@ -463,6 +468,7 @@ class CityAudioManager {
   }
 
   public playPuzzleSolved(): void {
+    void mobileBridge.notifySuccess();
     this.ensureAmbientStarted();
     if (this.isMuted) return;
     const ctx = this.getContext();

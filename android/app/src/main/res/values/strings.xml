@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">PrismGrid 3D</string>
+    <string name="title_activity_main">PrismGrid 3D</string>
+    <string name="package_name">com.prismgrid.app</string>
+    <string name="custom_url_scheme">com.prismgrid.app</string>
+</resources>
