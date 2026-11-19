@@ -197,8 +197,14 @@ export const STAGING_Z_COORDS = [3, 4] as const;
 export const ALL_Z_MAX = 4;
 
 export const GRID_Y_MIN = 0;
-export const GRID_Y_MAX = 8;
-export const GRID_Y_COORDS = [0, 1, 2, 3, 4, 5, 6, 7, 8] as const;
+export const GRID_Y_MAX = 14;
+export const GRID_Y_COORDS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14] as const;
+
+/**
+ * Vertical height scale of each block unit relative to a full Neighboring Building floor (1.0 * spacing).
+ * At 0.5, each 1-unit block is half the height of a building floor, so 2 stacked blocks equal 1 building story!
+ */
+export const BLOCK_HEIGHT_SCALE = 0.5;
 
 /**
  * Rotates a piece 90 degrees around the world X, Y, or Z axis:
@@ -337,16 +343,19 @@ export function isPieceInCentralZone(
 
 /**
  * Computes the world center offset of a piece given its integer anchor [x, y, z] and dimensions [w, h, d].
- * X uses [-3..+3], Z uses [-2..+4], and Y uses [0..5] where y = 0 rests directly on the floor plane.
+ * X uses [-3..+3], Z uses [-2..+4], and Y uses half-floor height steps (`BLOCK_HEIGHT_SCALE = 0.5`)
+ * so that y = 0 rests directly on the floor plane (`-2.5 * spacing`) and each block is half a building floor tall.
  */
 export function getPieceWorldCenter(
   pos: [number, number, number],
   dims: [number, number, number],
   spacing = 0.82
 ): [number, number, number] {
+  const unitH = spacing * BLOCK_HEIGHT_SCALE;
+  const floorWorldY = -2.5 * spacing;
   return [
     (pos[0] + (dims[0] - 1) * 0.5) * spacing,
-    (pos[1] - 2 + (dims[1] - 1) * 0.5) * spacing,
+    floorWorldY + (pos[1] + dims[1] * 0.5) * unitH,
     (pos[2] + (dims[2] - 1) * 0.5) * spacing,
   ];
 }
@@ -825,8 +834,9 @@ export function isBalconyShadedByBlocks(
     if (!block.visible || !doesShapeBlockSun(block.shape)) continue;
     const minX = block.x - 0.51;
     const maxX = block.x + 0.51;
-    const minY = block.y - 0.51;
-    const maxY = block.y + 0.51;
+    // Convert block's half-floor Y index into full building-floor Y coordinates (where floor plane = -0.5)
+    const minY = -0.5 + block.y * BLOCK_HEIGHT_SCALE - 0.02;
+    const maxY = -0.5 + (block.y + 1) * BLOCK_HEIGHT_SCALE + 0.02;
     const minZ = block.z - 0.51;
     const maxZ = block.z + 0.51;
 
@@ -1090,7 +1100,128 @@ export const GLASS_THEMES: Record<GlassThemeId, GlassTheme> = {
   },
 };
 
-export const PUZZLE_LEVELS: PuzzleLevel[] = [
+const EXTRA_HALF_HEIGHT_POOL: Array<{
+  suffix: string;
+  name: string;
+  shape: ShapeKind;
+  dims: [number, number, number];
+  startPos: [number, number, number];
+  targetPos: [number, number, number];
+  accentColor: string;
+  wallSilhouette: SilhouetteProfile;
+  floorSilhouette: SilhouetteProfile;
+}> = [
+  {
+    suffix: 'half-mod-a',
+    name: 'Half-Story Terrace Pod A (1×1×1)',
+    shape: 'cube',
+    dims: [1, 1, 1],
+    startPos: [-3, 1, 3],
+    targetPos: [-3, 2, 2],
+    accentColor: '#38bdf8',
+    wallSilhouette: 'rect',
+    floorSilhouette: 'rect',
+  },
+  {
+    suffix: 'half-mod-b',
+    name: 'Half-Story Prism Louver (1×1×1)',
+    shape: 'prism',
+    dims: [1, 1, 1],
+    startPos: [3, 1, 3],
+    targetPos: [3, 2, 2],
+    accentColor: '#34d399',
+    wallSilhouette: 'triangle',
+    floorSilhouette: 'rect',
+  },
+  {
+    suffix: 'half-pipe-a',
+    name: 'Half-Story Open Pipe Cube (1×1×1 — Sun Passes Through)',
+    shape: 'pipe-frame',
+    dims: [1, 1, 1],
+    startPos: [0, 1, 4],
+    targetPos: [0, 2, 2],
+    accentColor: '#2dd4bf',
+    wallSilhouette: 'rect',
+    floorSilhouette: 'rect',
+  },
+  {
+    suffix: 'half-mod-c',
+    name: 'Half-Story Cantilever Span (2×1×1)',
+    shape: 'beam-wide',
+    dims: [2, 1, 1],
+    startPos: [-2, 1, 4],
+    targetPos: [-2, 3, 2],
+    accentColor: '#fbbf24',
+    wallSilhouette: 'rect',
+    floorSilhouette: 'rect',
+  },
+  {
+    suffix: 'half-mod-d',
+    name: 'Half-Story East Span (2×1×1)',
+    shape: 'beam-wide',
+    dims: [2, 1, 1],
+    startPos: [1, 1, 4],
+    targetPos: [1, 3, 2],
+    accentColor: '#f43f5e',
+    wallSilhouette: 'rect',
+    floorSilhouette: 'rect',
+  },
+  {
+    suffix: 'half-pipe-b',
+    name: 'Half-Story Pipe Truss Cube (1×1×1 — Sun Passes Through)',
+    shape: 'pipe-frame',
+    dims: [1, 1, 1],
+    startPos: [-1, 1, 3],
+    targetPos: [-1, 3, 2],
+    accentColor: '#38bdf8',
+    wallSilhouette: 'rect',
+    floorSilhouette: 'rect',
+  },
+  {
+    suffix: 'half-mod-e',
+    name: 'Half-Story Crown Spire (1×1×1)',
+    shape: 'pyramid',
+    dims: [1, 1, 1],
+    startPos: [1, 1, 3],
+    targetPos: [2, 3, 2],
+    accentColor: '#e879f9',
+    wallSilhouette: 'triangle',
+    floorSilhouette: 'rect',
+  },
+];
+
+function enrichLevelsWithHalfHeightBlocks(baseLevels: PuzzleLevel[]): PuzzleLevel[] {
+  return baseLevels.map((lvl, idx) => {
+    // Levels 01-04 get +4 extra blocks (12-16 total); Levels 05-12 get +5 extra blocks (15-17 total); Levels 13-20 get +6 to +7 extra blocks (18-21 total)
+    const extraCount = idx < 4 ? 4 : idx < 12 ? 5 : idx < 17 ? 6 : 7;
+    const extraPieces: Omit<WallPiece, 'position'>[] = EXTRA_HALF_HEIGHT_POOL.slice(
+      0,
+      extraCount
+    ).map((tpl) => ({
+      id: `${lvl.id}-${tpl.suffix}`,
+      name: tpl.name,
+      shape: tpl.shape,
+      dims: [...tpl.dims] as [number, number, number],
+      baseDims: [...tpl.dims] as [number, number, number],
+      rotation: [0, 0, 0],
+      targetPosition: [...tpl.targetPos] as [number, number, number],
+      initialPosition: [...tpl.startPos] as [number, number, number],
+      accentColor: tpl.accentColor,
+      wallSilhouette: tpl.wallSilhouette,
+      floorSilhouette: tpl.floorSilhouette,
+    }));
+
+    const allPieces = [...lvl.pieces, ...extraPieces];
+
+    return {
+      ...lvl,
+      subtitle: `${lvl.subtitle.replace(/\b\d+\s+(?:skyscraper\s+|modular\s+|structural\s+|arcology\s+)?(?:modules|blocks|units)\b/i, `${allPieces.length} half-story modules`)}`,
+      pieces: allPieces,
+    };
+  });
+}
+
+const RAW_PUZZLE_LEVELS: PuzzleLevel[] = [
   {
     id: 'level-1-monument',
     number: '01',
@@ -4995,5 +5126,9 @@ export const PUZZLE_LEVELS: PuzzleLevel[] = [
     ],
   },
 ];
+
+export const PUZZLE_LEVELS: PuzzleLevel[] =
+  enrichLevelsWithHalfHeightBlocks(RAW_PUZZLE_LEVELS);
+
 
 
