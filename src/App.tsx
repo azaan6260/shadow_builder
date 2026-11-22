@@ -81,7 +81,7 @@ export default function App() {
     if (!isCraneAnimating || !lastCraneTransfer) return;
     const timer = window.setTimeout(() => {
       setCraneAnimating(false);
-    }, 2400);
+    }, 5500);
     return () => window.clearTimeout(timer);
   }, [isCraneAnimating, lastCraneTransfer, setCraneAnimating]);
 
@@ -759,7 +759,6 @@ export default function App() {
           wallStencils={winStatus.wallStencils}
           floorStencils={winStatus.floorStencils}
           lastCraneTransfer={lastCraneTransfer}
-          isCraneAnimating={isCraneAnimating}
           spacing={BLOCK_SPACING}
           themeId={themeId}
           dragPlaneMode={dragPlaneMode}

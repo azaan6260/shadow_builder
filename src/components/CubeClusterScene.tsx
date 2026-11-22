@@ -3041,7 +3041,6 @@ export interface CubeClusterSceneProps {
   allowedFloorSet: Set<string>;
   blockedWindowSet: Set<string>;
   lastCraneTransfer: CraneTransferOp | null;
-  isCraneAnimating: boolean;
   selectedPieceId: string | null;
   wallStencils: StencilElement[];
   floorStencils: StencilElement[];
@@ -3069,7 +3068,6 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
   allowedFloorSet,
   blockedWindowSet,
   lastCraneTransfer,
-  isCraneAnimating,
   selectedPieceId,
   wallStencils,
   floorStencils,
@@ -3084,6 +3082,8 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
   const controlsRef = useRef<OrbitControlsImpl | null>(null);
   const [hoveredPieceId, setHoveredPieceId] = useState<string | null>(null);
   const [hoveredColumn, setHoveredColumn] = useState<HoveredColumnTarget | null>(null);
+  const [releasedTransferOpId, setReleasedTransferOpId] = useState<number | null>(null);
+  const latestOpIdRef = useRef<number | null>(null);
 
   const theme = GLASS_THEMES[themeId];
   const selectedPiece = useMemo(
@@ -3130,6 +3130,8 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
     };
   }, [lastCraneTransfer, spacing]);
 
+  latestOpIdRef.current = activeTransferCenters?.opId ?? null;
+
   // Single Unified Spring Controller driving BOTH the Tower Crane and the active moving block
   const [craneSpring, craneApi] = useSpring(
     () => {
@@ -3148,7 +3150,7 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
         },
         to: async (next) => {
           if (!activeTransferCenters) return;
-          const { fromCenter, toCenter, dims } = activeTransferCenters;
+          const { opId, fromCenter, toCenter, dims } = activeTransferCenters;
           const halfH = dims[1] * spacing * BLOCK_HEIGHT_SCALE * 0.5;
           const liftY = Math.max(fromCenter[1], toCenter[1]) + 2.1;
           const movedHorizontally =
@@ -3162,70 +3164,77 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
             blockPos: fromCenter,
             immediate: true,
           });
+          if (latestOpIdRef.current !== opId) return;
 
           if (movedHorizontally) {
             // Step A: Tower Crane rotates its jib & slides its trolley to hover over the block at `fromCenter`
             // (The block remains 100% stationary at `fromCenter`!)
-            soundFX.playCraneSlew(0.32);
+            soundFX.playCraneSlew(0.28);
             await next({
               hookX: fromCenter[0],
               hookZ: fromCenter[2],
               hookY: CRANE_REST_Y,
               blockPos: fromCenter,
-              config: { mass: 1.1, tension: 320, friction: 26 },
+              config: { mass: 1.0, tension: 380, friction: 34, clamp: true },
             });
+            if (latestOpIdRef.current !== opId) return;
 
             // Step B: Tower Crane hook drops down to latch onto the top of the block at `fromCenter`
             // (The block still remains 100% stationary at `fromCenter`!)
-            soundFX.playCraneWinch('down', 0.26);
-            await next({
-              hookX: fromCenter[0],
-              hookZ: fromCenter[2],
-              hookY: fromCenter[1] + halfH + 0.12,
-              blockPos: fromCenter,
-              config: { mass: 1.0, tension: 380, friction: 26 },
-            });
-
-            // Step C: Attach block and hoist BOTH the hook and the block UP together in lockstep
-            soundFX.playCraneWinch('up', 0.3);
-            await next({
-              hookX: fromCenter[0],
-              hookZ: fromCenter[2],
-              hookY: liftY + halfH + 0.12,
-              blockPos: [fromCenter[0], liftY, fromCenter[2]],
-              config: { mass: 1.25, tension: 360, friction: 26 },
-            });
-
-            // Step D: Tower Crane slews & trolleys horizontally WITH the attached block in 100% lockstep
-            soundFX.playCraneSlew(0.38);
-            await next({
-              hookX: toCenter[0],
-              hookZ: toCenter[2],
-              hookY: liftY + halfH + 0.12,
-              blockPos: [toCenter[0], liftY, toCenter[2]],
-              config: { mass: 1.35, tension: 310, friction: 28 },
-            });
-          } else {
-            // Vertical-only nudge: crane hovers over block, lowers hook, and adjusts height together
             soundFX.playCraneWinch('down', 0.24);
             await next({
               hookX: fromCenter[0],
               hookZ: fromCenter[2],
               hookY: fromCenter[1] + halfH + 0.12,
               blockPos: fromCenter,
-              config: { mass: 1.0, tension: 360, friction: 26 },
+              config: { mass: 0.9, tension: 420, friction: 34, clamp: true },
             });
+            if (latestOpIdRef.current !== opId) return;
+
+            // Step C: Attach block and hoist BOTH the hook and the block UP together in lockstep
+            soundFX.playCraneWinch('up', 0.28);
+            await next({
+              hookX: fromCenter[0],
+              hookZ: fromCenter[2],
+              hookY: liftY + halfH + 0.12,
+              blockPos: [fromCenter[0], liftY, fromCenter[2]],
+              config: { mass: 1.1, tension: 380, friction: 35, clamp: true },
+            });
+            if (latestOpIdRef.current !== opId) return;
+
+            // Step D: Tower Crane slews & trolleys horizontally WITH the attached block in 100% lockstep
+            soundFX.playCraneSlew(0.34);
+            await next({
+              hookX: toCenter[0],
+              hookZ: toCenter[2],
+              hookY: liftY + halfH + 0.12,
+              blockPos: [toCenter[0], liftY, toCenter[2]],
+              config: { mass: 1.2, tension: 340, friction: 35, clamp: true },
+            });
+            if (latestOpIdRef.current !== opId) return;
+          } else {
+            // Vertical-only nudge: crane hovers over block, lowers hook, and adjusts height together
+            soundFX.playCraneWinch('down', 0.22);
+            await next({
+              hookX: fromCenter[0],
+              hookZ: fromCenter[2],
+              hookY: fromCenter[1] + halfH + 0.12,
+              blockPos: fromCenter,
+              config: { mass: 0.9, tension: 400, friction: 34, clamp: true },
+            });
+            if (latestOpIdRef.current !== opId) return;
           }
 
-          // Step E (Part 1): Lower hook + attached block together to gravity-settled `toCenter`
+          // Step E (Part 1): Lower hook + attached block together in lockstep to gravity-settled `toCenter`
           soundFX.playCraneWinch('down', 0.28);
           await next({
             hookX: toCenter[0],
             hookZ: toCenter[2],
             hookY: toCenter[1] + halfH + 0.12,
             blockPos: toCenter,
-            config: { mass: 2, tension: 300, friction: 20 },
+            config: { mass: 1.35, tension: 340, friction: 36, clamp: true },
           });
+          if (latestOpIdRef.current !== opId) return;
 
           // Heavy structural landing thud & grapple release when block settles into place
           soundFX.playCraneDropThud();
@@ -3236,18 +3245,18 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
             z: toCenter[2],
           };
 
-          // Notify store/UI that the block has reached its final target position so win state/score can display
-          // and the block immediately hands off to its live aligned staticWorldCenter
+          // Release block ONLY now that both the hook and block have physically landed at `toCenter`
+          setReleasedTransferOpId(opId);
           onCraneTransferComplete?.();
 
-          // Step E (Part 2): Detach block at `toCenter` and retract hook up to CRANE_REST_Y
+          // Step E (Part 2): Detach block at `toCenter` and retract empty hook up to CRANE_REST_Y
           soundFX.playCraneWinch('up', 0.24);
           await next({
             hookX: toCenter[0],
             hookZ: toCenter[2],
             hookY: CRANE_REST_Y,
             blockPos: toCenter,
-            config: { mass: 1.1, tension: 340, friction: 26 },
+            config: { mass: 0.9, tension: 400, friction: 34, clamp: true },
           });
         },
       };
@@ -3255,9 +3264,29 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
     [activeTransferCenters?.opId]
   );
 
-  // When the user selects a block (before clicking a destination cell), smoothly slew the Tower Crane to hover above it
+  const onCraneTransferCompleteRef = useRef(onCraneTransferComplete);
+  onCraneTransferCompleteRef.current = onCraneTransferComplete;
+
+  // When the user selects a block (or rotates it), smoothly slew the Tower Crane to hover above it
+  // without ever interrupting an active crane transfer for that same block (e.g. keyboard nudge).
   useEffect(() => {
     if (!selectedPiece) return;
+    const activeTransfer = activeTransferCenters;
+    // Never interrupt an active crane transfer for this same piece, and avoid redundant slew
+    // right as Step E Part 2 retracts the hook above the piece that just landed
+    if (activeTransfer !== null && activeTransfer.pieceId === selectedPiece.id) {
+      return;
+    }
+
+    // If the player fast-selects a different block while an earlier transfer is mid-flight, release that earlier block cleanly
+    if (
+      activeTransfer !== null &&
+      releasedTransferOpId !== activeTransfer.opId
+    ) {
+      setReleasedTransferOpId(activeTransfer.opId);
+      onCraneTransferCompleteRef.current?.();
+    }
+
     const center = getPieceWorldCenter(
       selectedPiece.position,
       selectedPiece.dims,
@@ -3273,7 +3302,7 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
         prevHookRef.current = { x: center[0], z: center[2] };
       },
     });
-  }, [selectedPiece, spacing, craneApi]);
+  }, [selectedPiece, spacing, craneApi, activeTransferCenters, releasedTransferOpId]);
 
   // Calculate live ghost landing position, validity on allowedFloorSet (including left/right cantilever support at y > 0), & grid anchor
   const candidatePlacement = useMemo(() => {
@@ -3828,7 +3857,9 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
               spacing
             );
             const isTransferredByCrane =
-              isCraneAnimating && activeTransferCenters?.pieceId === piece.id;
+              activeTransferCenters !== null &&
+              activeTransferCenters.pieceId === piece.id &&
+              releasedTransferOpId !== activeTransferCenters.opId;
 
             return (
               <MovableShapeMesh
