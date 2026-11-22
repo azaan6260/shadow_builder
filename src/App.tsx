@@ -35,6 +35,7 @@ import {
   projectAngledShadow,
 } from './types/puzzle';
 import { CubeClusterScene } from './components/CubeClusterScene';
+import { MobileGameControls } from './components/MobileGameControls';
 import { usePuzzleStore } from './store/usePuzzleStore';
 import { mobileBridge } from './utils/capacitorBridge';
 import { soundFX } from './utils/sound';
@@ -491,115 +492,40 @@ export default function App() {
         </div>
       </header>
 
-      {/* Mobile Bottom Control Dock — Large, Clear, High-Contrast Touch Buttons for 3-Axis Rotation & Directional Shift */}
-      <div className="sm:hidden fixed bottom-2.5 left-2 right-2 z-20 flex flex-col gap-1.5 p-2 rounded-2xl bg-[#090d16]/95 border border-slate-700/90 shadow-2xl pointer-events-auto">
-        {/* Top Row of Mobile Dock: Status Badge + Selected Block Hint */}
-        <div className="flex items-center justify-between px-1 text-[11px] font-mono-tabular">
-          <div className="flex items-center gap-2">
-            <span className="text-slate-200 font-semibold">
-              {winStatus.placedPiecesCount}/{winStatus.totalPieces} Stacked
-            </span>
-            <span className="text-slate-600">·</span>
-            <span
-              className={
-                winStatus.blockedWindows.length === 0
-                  ? 'text-amber-300 font-semibold'
-                  : 'text-rose-400 font-bold'
-              }
-            >
-              {winStatus.blockedWindows.length === 0
-                ? `${sunlitWindows}/${windowCoordinates.length} Happy`
-                : `${winStatus.blockedWindows.length} Angry`}
-            </span>
-          </div>
-          <button
-            type="button"
-            onClick={cycleSelectedPiece}
-            className="px-2 py-0.5 rounded-md bg-slate-800 border border-slate-600 text-sky-300 font-semibold active:scale-95 cursor-pointer"
+      {/* Mobile Slim Status Strip directly under Header (Clean unboxed status + Next Block action) */}
+      <div className="sm:hidden fixed top-13 left-0 right-0 z-10 flex items-center justify-between px-3 py-1 bg-[#090d16]/80 backdrop-blur-sm border-b border-slate-800/80 text-[11px] font-mono-tabular pointer-events-auto">
+        <div className="flex items-center gap-2 whitespace-nowrap">
+          <span className="text-slate-200 font-semibold">
+            {winStatus.placedPiecesCount}/{winStatus.totalPieces} Stacked
+          </span>
+          <span className="text-slate-600" aria-hidden="true">·</span>
+          <span
+            className={
+              winStatus.blockedWindows.length === 0
+                ? 'text-amber-300 font-semibold'
+                : 'text-rose-400 font-bold'
+            }
           >
-            {activeSelectedId ? 'Next Block ↻' : 'Select Block'}
-          </button>
+            {winStatus.blockedWindows.length === 0
+              ? `${sunlitWindows}/${windowCoordinates.length} Happy`
+              : `${winStatus.blockedWindows.length} Angry`}
+          </span>
         </div>
-
-        {/* Bottom Row of Mobile Dock: Large 3-Axis Rotation Buttons + 4-Way Directional Shift Buttons */}
-        <div className="grid grid-cols-7 gap-1.5">
-          {(['x', 'y', 'z'] as const).map((axis) => (
-            <button
-              key={`mobile-rotate-${axis}`}
-              type="button"
-              onClick={() => handleRotateAxis(axis)}
-              className={`flex flex-col items-center justify-center min-h-[44px] py-1.5 px-1 rounded-xl font-mono-tabular font-bold text-xs border transition-all active:scale-95 cursor-pointer ${
-                activeSelectedId
-                  ? 'bg-sky-500/25 text-sky-200 border-sky-400/60 shadow-sm'
-                  : 'bg-slate-800/80 text-slate-300 border-slate-700'
-              }`}
-            >
-              <span className="text-[10px] text-sky-400 uppercase leading-none mb-0.5">
-                Rot
-              </span>
-              <span className="text-sm font-extrabold leading-none">
-                {axis.toUpperCase()}
-              </span>
-            </button>
-          ))}
-
-          <button
-            type="button"
-            onClick={() => handleNudgeSelected([-1, 0, 0])}
-            className={`flex flex-col items-center justify-center min-h-[44px] py-1.5 rounded-xl border transition-all active:scale-95 cursor-pointer ${
-              activeSelectedId
-                ? 'bg-emerald-500/25 text-emerald-200 border-emerald-400/60'
-                : 'bg-slate-800/80 text-slate-400 border-slate-700'
-            }`}
-            aria-label="Slide Block Left"
-          >
-            <ArrowLeft className="w-5 h-5" />
-            <span className="text-[9px] font-bold leading-none mt-0.5">Left</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => handleNudgeSelected([1, 0, 0])}
-            className={`flex flex-col items-center justify-center min-h-[44px] py-1.5 rounded-xl border transition-all active:scale-95 cursor-pointer ${
-              activeSelectedId
-                ? 'bg-emerald-500/25 text-emerald-200 border-emerald-400/60'
-                : 'bg-slate-800/80 text-slate-400 border-slate-700'
-            }`}
-            aria-label="Slide Block Right"
-          >
-            <ArrowRight className="w-5 h-5" />
-            <span className="text-[9px] font-bold leading-none mt-0.5">Right</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => handleNudgeSelected([0, 0, -1])}
-            className={`flex flex-col items-center justify-center min-h-[44px] py-1.5 rounded-xl border transition-all active:scale-95 cursor-pointer ${
-              activeSelectedId
-                ? 'bg-emerald-500/25 text-emerald-200 border-emerald-400/60'
-                : 'bg-slate-800/80 text-slate-400 border-slate-700'
-            }`}
-            aria-label="Slide Block Back"
-          >
-            <ArrowUp className="w-5 h-5" />
-            <span className="text-[9px] font-bold leading-none mt-0.5">Back</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => handleNudgeSelected([0, 0, 1])}
-            className={`flex flex-col items-center justify-center min-h-[44px] py-1.5 rounded-xl border transition-all active:scale-95 cursor-pointer ${
-              activeSelectedId
-                ? 'bg-emerald-500/25 text-emerald-200 border-emerald-400/60'
-                : 'bg-slate-800/80 text-slate-400 border-slate-700'
-            }`}
-            aria-label="Slide Block Forward"
-          >
-            <ArrowDown className="w-5 h-5" />
-            <span className="text-[9px] font-bold leading-none mt-0.5">Front</span>
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={cycleSelectedPiece}
+          className="px-2.5 py-0.5 rounded-lg bg-slate-800/90 border border-slate-600 text-sky-300 font-semibold active:scale-95 transition-transform cursor-pointer whitespace-nowrap"
+        >
+          {activeSelectedId ? 'Next Block' : 'Select Block'}
+        </button>
       </div>
+
+      {/* Mobile Dual-Corner Round Controls: Bottom-Left Move Joystick & Bottom-Right Rotate Wheel */}
+      <MobileGameControls
+        hasSelectedBlock={Boolean(activeSelectedId)}
+        onMove={handleNudgeSelected}
+        onRotate={handleRotateAxis}
+      />
 
       {/* 20-Level Selection Modal Drawer */}
       {levelDrawerOpen && (
@@ -748,7 +674,7 @@ export default function App() {
       )}
 
       {/* Unobstructed Full-Viewport 3D Urban Cityscape with Tower Crane, Gardens, Roads, Cars, Clouds & Birds */}
-      <main className="w-full h-full pt-13 sm:pt-14 pb-20 sm:pb-0">
+      <main className="w-full h-full pt-13 sm:pt-14">
         <CubeClusterScene
           pieces={pieces}
           blocks={blocks}
