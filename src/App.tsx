@@ -24,6 +24,7 @@ import {
   X,
 } from 'lucide-react';
 import {
+  BLOCK_SPACING,
   CameraPresetId,
   GlassThemeId,
   LIGHT_POSITION,
@@ -758,7 +759,7 @@ export default function App() {
           wallStencils={winStatus.wallStencils}
           floorStencils={winStatus.floorStencils}
           lastCraneTransfer={lastCraneTransfer}
-          spacing={0.82}
+          spacing={BLOCK_SPACING}
           themeId={themeId}
           dragPlaneMode={dragPlaneMode}
           activeCameraPreset={activeCameraPreset}

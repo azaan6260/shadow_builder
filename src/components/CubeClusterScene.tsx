@@ -7,11 +7,15 @@ import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import {
+  BALCONY_BASE_BLOCK_Y,
   BALCONY_GRID_Z,
   BLOCK_HEIGHT_SCALE,
+  BLOCK_SPACING,
+  BUILDING_FLOOR_BLOCK_RATIO,
   BlockState,
   CAMERA_PRESETS,
   CameraPresetId,
+  FLOOR_WORLD_Y,
   GLASS_THEMES,
   GlassTheme,
   GlassThemeId,
@@ -51,14 +55,15 @@ export const isSoftwareGl = (() => {
   }
 })();
 
-// World coordinates calibrated for compact blocks (spacing = 0.82) across a 7-column (-3..+3) urban plot
-const WALL_Z = -2.56;
-const BALCONY_Z = -2.18;
-const FLOOR_Y = -2.08;
-const CRANE_JIB_Y = 5.65;
-const CRANE_REST_Y = 4.65;
-const CRANE_PIVOT_X = -3.35;
-const CRANE_PIVOT_Z = 0.2;
+// World coordinates calibrated for isotropic half-floor cubic blocks (BLOCK_SPACING = 0.56)
+// across a 7-column (-3..+3) urban plot, where 2 stacked cubic blocks equal 1 Neighboring Building floor (1.12).
+const WALL_Z = -3.22 * BLOCK_SPACING;
+const BALCONY_Z = BALCONY_GRID_Z * BLOCK_SPACING;
+const FLOOR_Y = FLOOR_WORLD_Y;
+const CRANE_JIB_Y = 5.45;
+const CRANE_REST_Y = 4.45;
+const CRANE_PIVOT_X = -2.75;
+const CRANE_PIVOT_Z = 0.25;
 
 // Custom depth material so skyscraper modules cast solid real-time shadows onto Neighboring Buildings and Ground
 const SHARED_CUSTOM_DEPTH_MAT = new THREE.MeshDepthMaterial({
@@ -211,10 +216,10 @@ function computeResponsiveZoom(
 ): number {
   const safeW = Math.max(240, width - 16);
   const safeH = Math.max(200, height - 48);
-  const maxZoomByWidth = safeW / 11.4;
-  const maxZoomByHeight = safeH / 10.2;
-  const scale = Math.min(1.22, maxZoomByWidth / 60, maxZoomByHeight / 60);
-  return Math.max(18, baseZoom * scale);
+  const maxZoomByWidth = safeW / 9.8;
+  const maxZoomByHeight = safeH / 8.8;
+  const scale = Math.min(1.28, maxZoomByWidth / 60, maxZoomByHeight / 60);
+  return Math.max(20, baseZoom * scale);
 }
 
 function CameraController({
@@ -961,40 +966,43 @@ function BalconyWithPerson({
   const [offX, offY, offZ] = useMemo(() => getBalconyOffset(wx, wy), [wx, wy]);
 
   const worldX = (wx + offX) * spacing;
-  const worldY = (wy - 2 + offY) * spacing;
+  const worldY =
+    FLOOR_Y +
+    (BALCONY_BASE_BLOCK_Y + (wy + offY) * BUILDING_FLOOR_BLOCK_RATIO) * spacing;
   const worldZ = BALCONY_Z + offZ * spacing;
 
   const seed = Math.abs(wx * 17 + wy * 31);
-  // Vary balcony width and number of people (2 or 3 people on most balconies, 1 on compact terraces)
+  // Vary balcony width and number of people cleanly scaled to the 0.56 column width so adjacent balconies never overlap
   const peopleCount = seed % 4 === 0 ? 3 : seed % 4 === 3 ? 1 : 2;
-  const slabWidth = peopleCount === 3 ? 0.86 : peopleCount === 2 ? 0.76 : 0.64;
-  const slabDepth = 0.64;
+  const slabWidth =
+    (peopleCount === 3 ? 0.9 : peopleCount === 2 ? 0.82 : 0.72) * spacing;
+  const slabDepth = 0.76 * spacing;
 
   const residents = useMemo(() => {
     if (peopleCount === 3) {
       return [
         {
-          localX: -0.22,
-          localZ: 0.04,
+          localX: -0.145,
+          localZ: 0.03,
           baseRotY: 0.22,
-          scale: 0.86,
+          scale: 0.68,
           shirtColor: HAPPY_SHIRT_COLORS[seed % HAPPY_SHIRT_COLORS.length],
           phaseSeed: seed * 1.1,
         },
         {
           localX: 0,
-          localZ: -0.03,
+          localZ: -0.02,
           baseRotY: 0,
-          scale: 0.92,
+          scale: 0.72,
           shirtColor:
             HAPPY_SHIRT_COLORS[(seed + 2) % HAPPY_SHIRT_COLORS.length],
           phaseSeed: seed * 2.3 + 1.7,
         },
         {
-          localX: 0.22,
-          localZ: 0.05,
+          localX: 0.145,
+          localZ: 0.035,
           baseRotY: -0.22,
-          scale: 0.84,
+          scale: 0.66,
           shirtColor:
             HAPPY_SHIRT_COLORS[(seed + 4) % HAPPY_SHIRT_COLORS.length],
           phaseSeed: seed * 3.1 + 3.4,
@@ -1004,18 +1012,18 @@ function BalconyWithPerson({
     if (peopleCount === 2) {
       return [
         {
-          localX: -0.15,
-          localZ: 0.03,
+          localX: -0.105,
+          localZ: 0.025,
           baseRotY: 0.18,
-          scale: 0.9,
+          scale: 0.72,
           shirtColor: HAPPY_SHIRT_COLORS[seed % HAPPY_SHIRT_COLORS.length],
           phaseSeed: seed * 1.3,
         },
         {
-          localX: 0.15,
+          localX: 0.105,
           localZ: 0.02,
           baseRotY: -0.18,
-          scale: 0.86,
+          scale: 0.68,
           shirtColor:
             HAPPY_SHIRT_COLORS[(seed + 3) % HAPPY_SHIRT_COLORS.length],
           phaseSeed: seed * 2.7 + 2.1,
@@ -1025,9 +1033,9 @@ function BalconyWithPerson({
     return [
       {
         localX: 0,
-        localZ: 0.04,
+        localZ: 0.03,
         baseRotY: 0,
-        scale: 0.92,
+        scale: 0.74,
         shirtColor: HAPPY_SHIRT_COLORS[seed % HAPPY_SHIRT_COLORS.length],
         phaseSeed: seed * 1.5,
       },
@@ -1038,12 +1046,12 @@ function BalconyWithPerson({
     <group position={[worldX, worldY, worldZ]}>
       {/* 1. Recessed Apartment Balcony Glass Doorway on Facade */}
       <mesh
-        position={[0, 0.02, WALL_Z - worldZ + 0.02]}
+        position={[0, 0.04, WALL_Z - worldZ + 0.02]}
         castShadow={false}
         receiveShadow={true}
         raycast={() => null}
       >
-        <planeGeometry args={[slabWidth * 0.78, 0.64]} />
+        <planeGeometry args={[slabWidth * 0.78, 0.58]} />
         <meshStandardMaterial
           color={isBlocked ? '#450a0a' : '#fef08a'}
           emissive={isBlocked ? '#991b1b' : '#fde047'}
@@ -1054,12 +1062,12 @@ function BalconyWithPerson({
 
       {/* 2. Cantilevered Concrete Balcony Floor Slab */}
       <mesh
-        position={[0, -0.29, 0]}
+        position={[0, -0.28, 0]}
         castShadow={true}
         receiveShadow={true}
         raycast={() => null}
       >
-        <boxGeometry args={[slabWidth, 0.08, slabDepth]} />
+        <boxGeometry args={[slabWidth, 0.07, slabDepth]} />
         <meshStandardMaterial
           color={isBlocked ? '#7f1d1d' : '#cbd5e1'}
           roughness={0.8}
@@ -2634,86 +2642,86 @@ function DualShadowStage({
       {/* 1. TALL ASYMMETRIC NEIGHBORING BUILDINGS (Dark Slate) + BALCONIES     */}
       {/* ===================================================================== */}
       <group>
-        {/* West Residential High-Rise Tower (Covers X = -3, -2, -1; height = 10.8 * spacing) */}
+        {/* West Residential High-Rise Tower (Covers X = -3, -2, -1; 7 full building stories tall) */}
         <mesh
-          position={[-2.05 * spacing, 2.35 * spacing, WALL_Z - 0.85]}
+          position={[-2.02 * spacing, FLOOR_Y + 3.9, WALL_Z - 0.75]}
           receiveShadow={true}
           castShadow={true}
           raycast={() => null}
         >
-          <boxGeometry args={[3.35 * spacing, 10.8 * spacing, 1.7]} />
+          <boxGeometry args={[3.24 * spacing, 7.8, 1.5]} />
           <meshStandardMaterial color="#334155" roughness={0.86} metalness={0.08} />
           <Edges scale={1.0} threshold={15} color="#0f172a" />
         </mesh>
 
-        {/* West Tower Upper Penthouse Crown & Illuminated Sky-Loft Window Bands */}
+        {/* West Tower Upper Penthouse Crown */}
         <mesh
-          position={[-2.05 * spacing, 8.05 * spacing, WALL_Z - 0.85]}
+          position={[-2.02 * spacing, FLOOR_Y + 8.05, WALL_Z - 0.75]}
           receiveShadow={true}
           castShadow={true}
           raycast={() => null}
         >
-          <boxGeometry args={[2.55 * spacing, 0.65 * spacing, 1.3]} />
+          <boxGeometry args={[2.45 * spacing, 0.5, 1.15]} />
           <meshStandardMaterial color="#1e293b" roughness={0.8} metalness={0.15} />
           <Edges scale={1.0} threshold={15} color="#0f172a" />
         </mesh>
 
-        {/* Central Stepped Loft High-Rise (Covers X = 0; height = 9.6 * spacing) */}
+        {/* Central Stepped Loft High-Rise (Covers X = 0) */}
         <mesh
-          position={[0, 1.75 * spacing, WALL_Z - 0.88]}
+          position={[0, FLOOR_Y + 3.55, WALL_Z - 0.78]}
           receiveShadow={true}
           castShadow={true}
           raycast={() => null}
         >
-          <boxGeometry args={[1.18 * spacing, 9.6 * spacing, 1.76]} />
+          <boxGeometry args={[1.14 * spacing, 7.1, 1.56]} />
           <meshStandardMaterial color="#273244" roughness={0.88} metalness={0.06} />
           <Edges scale={1.0} threshold={15} color="#0f172a" />
         </mesh>
 
         {/* Central Tower Crown */}
         <mesh
-          position={[0, 6.85 * spacing, WALL_Z - 0.88]}
+          position={[0, FLOOR_Y + 7.32, WALL_Z - 0.78]}
           receiveShadow={true}
           castShadow={true}
           raycast={() => null}
         >
-          <boxGeometry args={[0.88 * spacing, 0.55 * spacing, 1.35]} />
+          <boxGeometry args={[0.85 * spacing, 0.44, 1.2]} />
           <meshStandardMaterial color="#1e293b" roughness={0.8} metalness={0.15} />
           <Edges scale={1.0} threshold={15} color="#0f172a" />
         </mesh>
 
-        {/* East Terrace High-Rise Tower (Covers X = 1, 2, 3; height = 10.4 * spacing) */}
+        {/* East Terrace High-Rise Tower (Covers X = 1, 2, 3) */}
         <mesh
-          position={[2.05 * spacing, 2.15 * spacing, WALL_Z - 0.85]}
+          position={[2.02 * spacing, FLOOR_Y + 3.75, WALL_Z - 0.75]}
           receiveShadow={true}
           castShadow={true}
           raycast={() => null}
         >
-          <boxGeometry args={[3.35 * spacing, 10.4 * spacing, 1.7]} />
+          <boxGeometry args={[3.24 * spacing, 7.5, 1.5]} />
           <meshStandardMaterial color="#334155" roughness={0.86} metalness={0.08} />
           <Edges scale={1.0} threshold={15} color="#0f172a" />
         </mesh>
 
         {/* East Tower Upper Penthouse Crown */}
         <mesh
-          position={[2.05 * spacing, 7.65 * spacing, WALL_Z - 0.85]}
+          position={[2.02 * spacing, FLOOR_Y + 7.75, WALL_Z - 0.75]}
           receiveShadow={true}
           castShadow={true}
           raycast={() => null}
         >
-          <boxGeometry args={[2.55 * spacing, 0.65 * spacing, 1.3]} />
+          <boxGeometry args={[2.45 * spacing, 0.5, 1.15]} />
           <meshStandardMaterial color="#1e293b" roughness={0.8} metalness={0.15} />
           <Edges scale={1.0} threshold={15} color="#0f172a" />
         </mesh>
 
-        {/* Upper-Story Architectural Glass Clerestory Bands on the Taller Neighboring Towers */}
-        {[4.2, 5.1, 6.0, 6.9].map((bandY, bIdx) => (
+        {/* Upper-Story Architectural Glass Clerestory Bands Above Floor 4 Balconies */}
+        {[5.85, 6.55, 7.25].map((offsetY, bIdx) => (
           <React.Fragment key={`upper-band-${bIdx}`}>
             <mesh
-              position={[-2.05 * spacing, bandY * spacing, WALL_Z + 0.008]}
+              position={[-2.02 * spacing, FLOOR_Y + offsetY, WALL_Z + 0.008]}
               raycast={() => null}
             >
-              <planeGeometry args={[2.95 * spacing, 0.22 * spacing]} />
+              <planeGeometry args={[2.85 * spacing, 0.2]} />
               <meshStandardMaterial
                 color="#38bdf8"
                 emissive="#0284c7"
@@ -2722,19 +2730,21 @@ function DualShadowStage({
                 metalness={0.7}
               />
             </mesh>
-            <mesh
-              position={[2.05 * spacing, (bandY - 0.15) * spacing, WALL_Z + 0.008]}
-              raycast={() => null}
-            >
-              <planeGeometry args={[2.95 * spacing, 0.22 * spacing]} />
-              <meshStandardMaterial
-                color="#38bdf8"
-                emissive="#0284c7"
-                emissiveIntensity={0.28}
-                roughness={0.2}
-                metalness={0.7}
-              />
-            </mesh>
+            {offsetY < 7.0 && (
+              <mesh
+                position={[2.02 * spacing, FLOOR_Y + offsetY - 0.12, WALL_Z + 0.008]}
+                raycast={() => null}
+              >
+                <planeGeometry args={[2.85 * spacing, 0.2]} />
+                <meshStandardMaterial
+                  color="#38bdf8"
+                  emissive="#0284c7"
+                  emissiveIntensity={0.28}
+                  roughness={0.2}
+                  metalness={0.7}
+                />
+              </mesh>
+            )}
           </React.Fragment>
         ))}
 
@@ -2755,12 +2765,12 @@ function DualShadowStage({
 
         {/* Prominent Shadow Overlay Receiver Plane across the Full Height of the Neighboring Building Facades */}
         <mesh
-          position={[0, 2.35 * spacing, WALL_Z + 0.015]}
+          position={[0, FLOOR_Y + 3.9, WALL_Z + 0.015]}
           receiveShadow={true}
           castShadow={false}
           raycast={() => null}
         >
-          <planeGeometry args={[8.2 * spacing, 10.8 * spacing]} />
+          <planeGeometry args={[7.8 * spacing, 7.8]} />
           <shadowMaterial color="#020617" transparent opacity={0.82} />
         </mesh>
       </group>
@@ -3311,8 +3321,8 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
       const maxWorldX = (px + w - 0.54) * spacing;
       const minWorldZ = (pz - 0.46) * spacing;
       const maxWorldZ = (pz + d - 0.54) * spacing;
-      const bottomWorldY = Math.max(FLOOR_Y, -2.5 * spacing + py * unitH);
-      const topWorldY = -2.5 * spacing + (py + h) * unitH;
+      const bottomWorldY = Math.max(FLOOR_Y, FLOOR_Y + py * unitH);
+      const topWorldY = FLOOR_Y + (py + h) * unitH;
 
       const deltaTopY = Math.max(0.1, topWorldY - FLOOR_Y);
       const deltaBottomY = Math.max(0, bottomWorldY - FLOOR_Y);

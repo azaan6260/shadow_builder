@@ -178,9 +178,20 @@ export interface PuzzleLevel {
 export const LIGHT_POSITION: [number, number, number] = [0, 10.07, 12];
 
 /** Grid Z coordinate of the protruding Neighboring Building balconies (just behind row z = -2) */
-export const BALCONY_GRID_Z = -2.65;
+export const BALCONY_GRID_Z = -2.75;
 
-/** 7-Column X Grid (-3..+3) for smaller, denser modular skyscraper blocks */
+/** Shared world Y coordinate of the urban ground / foundation plane */
+export const FLOOR_WORLD_Y = -2.08;
+
+/**
+ * Uniform isotropic world size of a 1x1x1 modular block cell across X, Y, and Z.
+ * At 0.56 world units, each block is a true 1:1:1 cube that is half the height of a
+ * Neighboring Building floor (BUILDING_FLOOR_BLOCK_RATIO = 2.0 -> 1.12 world units per story),
+ * ensuring blocks keep 100% identical proportions whether oriented horizontally or vertically!
+ */
+export const BLOCK_SPACING = 0.56;
+
+/** 7-Column X Grid (-3..+3) for compact modular skyscraper blocks */
 export const GRID_MIN = -3;
 export const GRID_MAX = 3;
 export const GRID_COORDS = [-3, -2, -1, 0, 1, 2, 3] as const;
@@ -201,10 +212,19 @@ export const GRID_Y_MAX = 14;
 export const GRID_Y_COORDS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14] as const;
 
 /**
- * Vertical height scale of each block unit relative to a full Neighboring Building floor (1.0 * spacing).
- * At 0.5, each 1-unit block is half the height of a building floor, so 2 stacked blocks equal 1 building story!
+ * Isotropic Y-to-XZ block ratio (1.0 = exact cube in all 3 axes so rotating a block
+ * vertically never squashes its height or distorts its aspect ratio).
  */
-export const BLOCK_HEIGHT_SCALE = 0.5;
+export const BLOCK_HEIGHT_SCALE = 1.0;
+
+/**
+ * Number of stacked cubic block units that equal one full Neighboring Building story.
+ * At 2.0, each 1x1x1 block is half a building floor tall, and 2 stacked blocks equal 1 story.
+ */
+export const BUILDING_FLOOR_BLOCK_RATIO = 2.0;
+
+/** Base vertical offset (in block units above FLOOR_WORLD_Y) for Floor 0 balconies */
+export const BALCONY_BASE_BLOCK_Y = 0.72;
 
 /**
  * Rotates a piece 90 degrees around the world X, Y, or Z axis:
@@ -343,19 +363,18 @@ export function isPieceInCentralZone(
 
 /**
  * Computes the world center offset of a piece given its integer anchor [x, y, z] and dimensions [w, h, d].
- * X uses [-3..+3], Z uses [-2..+4], and Y uses half-floor height steps (`BLOCK_HEIGHT_SCALE = 0.5`)
- * so that y = 0 rests directly on the floor plane (`-2.5 * spacing`) and each block is half a building floor tall.
+ * Uses uniform isotropic `spacing` across X, Y, and Z so every block rotates rigidly with exact proportions
+ * and y = 0 rests flush on `FLOOR_WORLD_Y`.
  */
 export function getPieceWorldCenter(
   pos: [number, number, number],
   dims: [number, number, number],
-  spacing = 0.82
+  spacing = BLOCK_SPACING
 ): [number, number, number] {
   const unitH = spacing * BLOCK_HEIGHT_SCALE;
-  const floorWorldY = -2.5 * spacing;
   return [
     (pos[0] + (dims[0] - 1) * 0.5) * spacing,
-    floorWorldY + (pos[1] + dims[1] * 0.5) * unitH,
+    FLOOR_WORLD_Y + (pos[1] + dims[1] * 0.5) * unitH,
     (pos[2] + (dims[2] - 1) * 0.5) * spacing,
   ];
 }
@@ -803,16 +822,18 @@ export function isBalconyShadedByBlocks(
   const [lx, ly, lz] = lightPosition;
   const [offX, offY, offZ] = getBalconyOffset(wx, wy);
   const bx = wx + offX;
-  const by = wy + offY;
+  const by =
+    BALCONY_BASE_BLOCK_Y +
+    (wy + offY) * BUILDING_FLOOR_BLOCK_RATIO;
   const bz = BALCONY_GRID_Z + offZ;
 
-  // Sample points across the balcony residents (left person, center, right person, torso & head)
+  // Sample points across the balcony residents (left person, center, right person, upper & lower torso)
   const samplePoints: Array<[number, number, number]> = [
     [bx, by, bz],
-    [bx - 0.22, by, bz],
-    [bx + 0.22, by, bz],
-    [bx, by + 0.22, bz - 0.06],
-    [bx, by - 0.16, bz + 0.06],
+    [bx - 0.2, by, bz],
+    [bx + 0.2, by, bz],
+    [bx, by + 0.34, bz - 0.06],
+    [bx, by - 0.34, bz + 0.06],
   ];
 
   const slabAxis = (
@@ -834,9 +855,8 @@ export function isBalconyShadedByBlocks(
     if (!block.visible || !doesShapeBlockSun(block.shape)) continue;
     const minX = block.x - 0.51;
     const maxX = block.x + 0.51;
-    // Convert block's half-floor Y index into full building-floor Y coordinates (where floor plane = -0.5)
-    const minY = -0.5 + block.y * BLOCK_HEIGHT_SCALE - 0.02;
-    const maxY = -0.5 + (block.y + 1) * BLOCK_HEIGHT_SCALE + 0.02;
+    const minY = block.y * BLOCK_HEIGHT_SCALE - 0.02;
+    const maxY = (block.y + 1) * BLOCK_HEIGHT_SCALE + 0.02;
     const minZ = block.z - 0.51;
     const maxZ = block.z + 0.51;
 
