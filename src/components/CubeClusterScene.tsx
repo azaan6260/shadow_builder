@@ -3041,6 +3041,7 @@ export interface CubeClusterSceneProps {
   allowedFloorSet: Set<string>;
   blockedWindowSet: Set<string>;
   lastCraneTransfer: CraneTransferOp | null;
+  isCraneAnimating: boolean;
   selectedPieceId: string | null;
   wallStencils: StencilElement[];
   floorStencils: StencilElement[];
@@ -3068,6 +3069,7 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
   allowedFloorSet,
   blockedWindowSet,
   lastCraneTransfer,
+  isCraneAnimating,
   selectedPieceId,
   wallStencils,
   floorStencils,
@@ -3228,7 +3230,14 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
           // Heavy structural landing thud & grapple release when block settles into place
           soundFX.playCraneDropThud();
 
+          // Sync hook resting coordinates immediately on landing so subsequent rotations/moves never jump
+          prevHookRef.current = {
+            x: toCenter[0],
+            z: toCenter[2],
+          };
+
           // Notify store/UI that the block has reached its final target position so win state/score can display
+          // and the block immediately hands off to its live aligned staticWorldCenter
           onCraneTransferComplete?.();
 
           // Step E (Part 2): Detach block at `toCenter` and retract hook up to CRANE_REST_Y
@@ -3240,11 +3249,6 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
             blockPos: toCenter,
             config: { mass: 1.1, tension: 340, friction: 26 },
           });
-
-          prevHookRef.current = {
-            x: toCenter[0],
-            z: toCenter[2],
-          };
         },
       };
     },
@@ -3824,7 +3828,7 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
               spacing
             );
             const isTransferredByCrane =
-              activeTransferCenters?.pieceId === piece.id;
+              isCraneAnimating && activeTransferCenters?.pieceId === piece.id;
 
             return (
               <MovableShapeMesh

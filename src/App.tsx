@@ -759,6 +759,7 @@ export default function App() {
           wallStencils={winStatus.wallStencils}
           floorStencils={winStatus.floorStencils}
           lastCraneTransfer={lastCraneTransfer}
+          isCraneAnimating={isCraneAnimating}
           spacing={BLOCK_SPACING}
           themeId={themeId}
           dragPlaneMode={dragPlaneMode}

@@ -658,13 +658,58 @@ export function isValidPiecePosition(
 }
 
 /**
+ * Counts how many cells of a piece's bottom footprint `[cx..cx+w-1, cz..cz+d-1]`
+ * are directly supported at `y = dropY - 1` (or by the ground when `dropY === 0`).
+ */
+export function countSupportedBottomCells(
+  cx: number,
+  dropY: number,
+  cz: number,
+  dims: [number, number, number],
+  settledOtherBlocks: BlockState[],
+  excludePieceId?: string | null
+): { supportedCells: number; supportingPieceIds: Set<string> } {
+  const [w, , d] = dims;
+  const supportingPieceIds = new Set<string>();
+
+  if (dropY <= 0) {
+    return { supportedCells: w * d, supportingPieceIds };
+  }
+
+  let supportedCells = 0;
+  const supportY = dropY - 1;
+
+  for (let dx = 0; dx < w; dx++) {
+    for (let dz = 0; dz < d; dz++) {
+      const bx = cx + dx;
+      const bz = cz + dz;
+      const supporter = settledOtherBlocks.find(
+        (b) =>
+          b.visible &&
+          (!excludePieceId || b.pieceId !== excludePieceId) &&
+          b.x === bx &&
+          b.y === supportY &&
+          b.z === bz
+      );
+      if (supporter) {
+        supportedCells++;
+        supportingPieceIds.add(supporter.pieceId);
+      }
+    }
+  }
+
+  return { supportedCells, supportingPieceIds };
+}
+
+/**
  * Resolves the best valid `[x, y, z]` landing position when a user clicks or hovers `(targetX, targetZ)`.
- * - Supports placing a horizontal multi-cell block on EITHER the left side (`anchorX = targetX - (w - 1)`)
- *   OR the right side (`anchorX = targetX`) of a vertical support block!
- * - `preferLeftX` / `preferBackZ` allow sub-cell pointer aiming (hovering the left half vs right half of a support block)
- *   to immediately select the left-cantilever or right-cantilever orientation.
- * - If the block is already sitting at one valid anchor on the clicked column, clicking again automatically
- *   toggles to the alternate cantilever side (e.g. from right side to left side).
+ * - Decides placement using the lower supporting block's top surface:
+ *   1. Lands directly on the clicked lower block's top elevation (`dropY === targetCellTopY`) instead of
+ *      jumping up onto an adjacent taller block and hanging over the clicked block.
+ *   2. Maximizes bottom-face support coverage (`supportedCells`) so multi-cell blocks snap flush onto
+ *      matching lower blocks instead of hanging half off the edge.
+ *   3. On narrow vertical support blocks (where left & right cantilever anchors have equal support),
+ *      uses `preferLeftX` / `preferBackZ` sub-cell aiming and click-toggling to pick either side.
  */
 export function resolveBestPlacementAnchor(
   targetPiece: WallPiece,
@@ -719,19 +764,27 @@ export function resolveBestPlacementAnchor(
     }
   }
 
-  // Check if there is an existing support block at the exact clicked/hovered cell (targetX, targetZ)
-  const hasSupportAtTargetCell = settledOtherBlocks.some(
-    (b) => b.visible && b.x === targetX && b.z === targetZ
+  // Exact top elevation of the clicked/hovered lower block at (targetX, targetZ)
+  const targetCellTopY = calculateGravityDrop(
+    targetX,
+    targetZ,
+    settledOtherBlocks,
+    targetPiece.id,
+    [1, 1, 1]
   );
+  const hasSupportAtTargetCell = targetCellTopY > 0;
 
   interface EvaluatedCandidate {
     pos: [number, number, number];
     isValid: boolean;
     isCurrentPos: boolean;
     isElevated: boolean;
+    restsOnTargetCell: boolean;
+    supportedCells: number;
+    orderIndex: number;
   }
 
-  const evaluated: EvaluatedCandidate[] = candidateAnchors.map(([cx, cz]) => {
+  const evaluated: EvaluatedCandidate[] = candidateAnchors.map(([cx, cz], orderIndex) => {
     const dropY = calculateGravityDrop(
       cx,
       cz,
@@ -760,11 +813,27 @@ export function resolveBestPlacementAnchor(
       pos[1] === targetPiece.position[1] &&
       pos[2] === targetPiece.position[2];
 
+    const { supportedCells } = countSupportedBottomCells(
+      cx,
+      dropY,
+      cz,
+      targetPiece.dims,
+      settledOtherBlocks,
+      targetPiece.id
+    );
+
+    const restsOnTargetCell = hasSupportAtTargetCell
+      ? dropY === targetCellTopY
+      : dropY === 0;
+
     return {
       pos,
       isValid,
       isCurrentPos,
       isElevated: dropY > 0,
+      restsOnTargetCell,
+      supportedCells,
+      orderIndex,
     };
   });
 
@@ -772,18 +841,14 @@ export function resolveBestPlacementAnchor(
   const validCandidates = evaluated.filter((c) => c.isValid);
 
   if (validCandidates.length > 0) {
-    // When clicking/hovering a cell adjacent to a support block (e.g., clicking X = -1 to cantilever left from X = 0),
-    // if one candidate anchor catches the elevated support block (`dropY > 0`) and the clicked cell itself is empty or
-    // we are already elevated, prioritize the elevated cantilever candidate if the user's piece is already elevated or
-    // if the ground cell is a garden!
     const nonCurrentValid = avoidCurrentPosition
       ? validCandidates.filter((c) => !c.isCurrentPos)
       : validCandidates;
 
     const pool = nonCurrentValid.length > 0 ? nonCurrentValid : validCandidates;
 
-    // If the user clicked an empty cell next to a tower while the selected piece is already stacked (or if the clicked cell
-    // has a block next to it), check if the user is trying to shift a stacked horizontal block to the left/right on the tower:
+    // If the user clicked an empty cell adjacent to a tower while the selected piece is already stacked,
+    // allow shifting the elevated cantilever onto that adjacent side
     if (!hasSupportAtTargetCell && targetPiece.position[1] > 0) {
       const elevatedMatch = pool.find((c) => c.isElevated);
       if (elevatedMatch) {
@@ -791,7 +856,21 @@ export function resolveBestPlacementAnchor(
       }
     }
 
-    return { gridPos: pool[0].pos, settledOthers, isValid: true };
+    // Sort valid candidates so placement is decided cleanly by the lower supporting block:
+    // 1. Lands directly on the clicked cell's top surface (doesn't jump onto a taller neighbor and hang over it)
+    // 2. Maximizes bottom-face support on the lower block(s) (prevents hanging half off when a flush fit exists)
+    // 3. Preserves `preferLeftX` / `preferBackZ` aiming order on ties (e.g., left vs right cantilever on a 1x1 column)
+    const ranked = [...pool].sort((a, b) => {
+      if (a.restsOnTargetCell !== b.restsOnTargetCell) {
+        return a.restsOnTargetCell ? -1 : 1;
+      }
+      if (a.supportedCells !== b.supportedCells) {
+        return b.supportedCells - a.supportedCells;
+      }
+      return a.orderIndex - b.orderIndex;
+    });
+
+    return { gridPos: ranked[0].pos, settledOthers, isValid: true };
   }
 
   const fallbackPos =

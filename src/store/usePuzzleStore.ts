@@ -10,6 +10,7 @@ import {
   STAGING_Z_MIN,
   WallPiece,
   calculateGravityDrop,
+  countSupportedBottomCells,
   deriveBlocksFromPieces,
   getTargetFloorShape,
   getTargetShadow,
@@ -211,13 +212,74 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
       );
 
       const otherPieces = pieces.filter((p) => p.id !== activeId);
+      const originalOtherBlocks = deriveBlocksFromPieces(otherPieces);
       const settledOthers = settlePiecesWithGravity(otherPieces);
       const settledOtherBlocks = deriveBlocksFromPieces(settledOthers);
 
       const wasInStaging = target.position[2] >= STAGING_Z_MIN;
+      const origY = target.position[1];
+      const origCenterX = target.position[0] + (target.dims[0] - 1) * 0.5;
+      const origCenterZ = target.position[2] + (target.dims[2] - 1) * 0.5;
 
-      // Search nearby (dx, dz) offsets around current anchor so rotating a 2-unit block near an edge or garden
-      // automatically snaps onto the nearest valid foundation / staging cells.
+      // Identify the lower supporting block(s) directly beneath `target` before rotation
+      const { supportingPieceIds: origSupporterIds } = countSupportedBottomCells(
+        target.position[0],
+        origY,
+        target.position[2],
+        target.dims,
+        originalOtherBlocks,
+        activeId
+      );
+
+      // Collect all top-surface (x, z) cells of those supporting lower block(s) at y === origY - 1
+      const supporterTopCellKeys = new Set<string>();
+      const supporterTopCells: Array<[number, number]> = [];
+      if (origY > 0 && origSupporterIds.size > 0) {
+        const supportY = origY - 1;
+        for (const b of settledOtherBlocks) {
+          if (b.visible && b.y === supportY && origSupporterIds.has(b.pieceId)) {
+            const key = `${b.x},${b.z}`;
+            if (!supporterTopCellKeys.has(key)) {
+              supporterTopCellKeys.add(key);
+              supporterTopCells.push([b.x, b.z]);
+            }
+          }
+        }
+      }
+
+      const minZBound = wasInStaging ? STAGING_Z_MIN : GRID_Z_MIN;
+      const maxZBound = wasInStaging
+        ? ALL_Z_MAX - nextDims[2] + 1
+        : GRID_Z_MAX - nextDims[2] + 1;
+
+      const clampX = (x: number) =>
+        Math.max(GRID_MIN, Math.min(GRID_MAX - nextDims[0] + 1, x));
+      const clampZ = (z: number) =>
+        Math.max(minZBound, Math.min(maxZBound, z));
+
+      // Gather unique candidate (candX, candZ) anchors:
+      // 1. Every anchor that places any bottom cell of the rotated block directly onto the lower supporting block(s)
+      // 2. Nearby offsets around the current anchor as fallback
+      const candidateCoords: Array<[number, number]> = [];
+      const seenCoords = new Set<string>();
+      const addCandidate = (rawX: number, rawZ: number) => {
+        const cx = clampX(rawX);
+        const cz = clampZ(rawZ);
+        const key = `${cx},${cz}`;
+        if (!seenCoords.has(key)) {
+          seenCoords.add(key);
+          candidateCoords.push([cx, cz]);
+        }
+      };
+
+      for (const [sx, sz] of supporterTopCells) {
+        for (let dx = 0; dx < nextDims[0]; dx++) {
+          for (let dz = 0; dz < nextDims[2]; dz++) {
+            addCandidate(sx - dx, sz - dz);
+          }
+        }
+      }
+
       const searchOffsets: Array<[number, number]> = [
         [0, 0],
         [-1, 0],
@@ -233,22 +295,22 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
         [0, -2],
         [0, 2],
       ];
-
-      let chosenPos: [number, number, number] | null = null;
-
       for (const [ox, oz] of searchOffsets) {
-        const rawX = target.position[0] + ox;
-        const rawZ = target.position[2] + oz;
-        const candX = Math.max(
-          GRID_MIN,
-          Math.min(GRID_MAX - nextDims[0] + 1, rawX)
-        );
-        const minZBound = wasInStaging ? STAGING_Z_MIN : GRID_Z_MIN;
-        const maxZBound = wasInStaging
-          ? ALL_Z_MAX - nextDims[2] + 1
-          : GRID_Z_MAX - nextDims[2] + 1;
-        const candZ = Math.max(minZBound, Math.min(maxZBound, rawZ));
+        addCandidate(target.position[0] + ox, target.position[2] + oz);
+      }
 
+      interface ScoredRotationCandidate {
+        pos: [number, number, number];
+        restsOnOrigSupporterAtOrigY: boolean;
+        staysAtOrigY: boolean;
+        supportedCells: number;
+        origSupporterOverlapCells: number;
+        centerDistSq: number;
+      }
+
+      const validCandidates: ScoredRotationCandidate[] = [];
+
+      for (const [candX, candZ] of candidateCoords) {
         const dropY = calculateGravityDrop(
           candX,
           candZ,
@@ -265,7 +327,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
         );
 
         if (
-          isValidPiecePosition(
+          !isValidPiecePosition(
             testPieces,
             activeId,
             candPos,
@@ -273,14 +335,88 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
             allowedFloorSet
           )
         ) {
-          chosenPos = candPos;
-          break;
+          continue;
         }
+
+        const { supportedCells, supportingPieceIds } = countSupportedBottomCells(
+          candX,
+          dropY,
+          candZ,
+          nextDims,
+          settledOtherBlocks,
+          activeId
+        );
+
+        let origSupporterOverlapCells = 0;
+        if (origY > 0 && dropY === origY) {
+          for (let dx = 0; dx < nextDims[0]; dx++) {
+            for (let dz = 0; dz < nextDims[2]; dz++) {
+              if (supporterTopCellKeys.has(`${candX + dx},${candZ + dz}`)) {
+                origSupporterOverlapCells++;
+              }
+            }
+          }
+        }
+
+        let sharesOrigSupporter = false;
+        for (const id of supportingPieceIds) {
+          if (origSupporterIds.has(id)) {
+            sharesOrigSupporter = true;
+            break;
+          }
+        }
+
+        const candCenterX = candX + (nextDims[0] - 1) * 0.5;
+        const candCenterZ = candZ + (nextDims[2] - 1) * 0.5;
+        const centerDistSq =
+          (candCenterX - origCenterX) ** 2 + (candCenterZ - origCenterZ) ** 2;
+
+        validCandidates.push({
+          pos: candPos,
+          restsOnOrigSupporterAtOrigY:
+            origY > 0 && dropY === origY && sharesOrigSupporter,
+          staysAtOrigY: dropY === origY,
+          supportedCells,
+          origSupporterOverlapCells,
+          centerDistSq,
+        });
       }
 
-      if (!chosenPos) {
+      if (validCandidates.length === 0) {
         return false;
       }
+
+      // Rank candidates so placement is decided cleanly by the lower supporting block(s):
+      // - When stacked (origY > 0): stay on the exact lower supporting block at `origY`, maximize
+      //   bottom-face support coverage (so it snaps flush instead of hanging half off), maximize
+      //   overlap with the lower supporting block's top surface, then pick the closest center.
+      // - When on the ground (origY === 0): stay on the ground (`dropY === 0`), then pick closest center.
+      validCandidates.sort((a, b) => {
+        if (origY > 0 && origSupporterIds.size > 0) {
+          if (a.restsOnOrigSupporterAtOrigY !== b.restsOnOrigSupporterAtOrigY) {
+            return a.restsOnOrigSupporterAtOrigY ? -1 : 1;
+          }
+          if (a.staysAtOrigY !== b.staysAtOrigY) {
+            return a.staysAtOrigY ? -1 : 1;
+          }
+          if (a.supportedCells !== b.supportedCells) {
+            return b.supportedCells - a.supportedCells;
+          }
+          if (a.origSupporterOverlapCells !== b.origSupporterOverlapCells) {
+            return b.origSupporterOverlapCells - a.origSupporterOverlapCells;
+          }
+        } else {
+          if (a.staysAtOrigY !== b.staysAtOrigY) {
+            return a.staysAtOrigY ? -1 : 1;
+          }
+          if (a.supportedCells !== b.supportedCells) {
+            return b.supportedCells - a.supportedCells;
+          }
+        }
+        return a.centerDistSq - b.centerDistSq;
+      });
+
+      const chosenPos = validCandidates[0].pos;
 
       const updatedPieces = pieces.map((p) =>
         p.id === activeId
@@ -307,6 +443,8 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
         blocks: nextBlocks,
         selectedBlockId: activeId,
         selectedPieceId: activeId,
+        lastCraneTransfer: null,
+        isCraneAnimating: false,
         history: [
           ...state.history.slice(-49),
           { pieces: state.pieces, blocks: state.blocks },
@@ -369,14 +507,16 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
 
       const nextPieces = settlePiecesWithGravity(candidatePieces);
       const nextBlocks = deriveBlocksFromPieces(nextPieces);
+      const finalPos =
+        nextPieces.find((p) => p.id === activeId)?.position ?? candidatePos;
 
-      const isNowInCentralZone = candidatePos[2] <= GRID_Z_MAX;
-      const calculatedY = candidatePos[1];
+      const isNowInCentralZone = finalPos[2] <= GRID_Z_MAX;
+      const calculatedY = finalPos[1];
 
       soundFX.playToggle(isNowInCentralZone, [
-        Math.sign(candidatePos[0]),
-        Math.sign(candidatePos[1]),
-        Math.sign(candidatePos[2]),
+        Math.sign(finalPos[0]),
+        Math.sign(finalPos[1]),
+        Math.sign(finalPos[2]),
       ]);
 
       set((state) => ({
@@ -389,7 +529,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
           seq: ++craneOpCounter,
           pieceId: activeId,
           fromPos,
-          toPos: candidatePos,
+          toPos: finalPos,
           dims: target.dims,
         },
         history: [
@@ -465,11 +605,13 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
         }
         const nextPieces = settlePiecesWithGravity(candidatePieces);
         const nextBlocks = deriveBlocksFromPieces(nextPieces);
+        const finalPos =
+          nextPieces.find((p) => p.id === id)?.position ?? candidatePos;
 
-        soundFX.playToggle(candidatePos[2] <= GRID_MAX, [
-          Math.sign(candidatePos[0]),
-          Math.sign(candidatePos[1]),
-          Math.sign(candidatePos[2]),
+        soundFX.playToggle(finalPos[2] <= GRID_MAX, [
+          Math.sign(finalPos[0]),
+          Math.sign(finalPos[1]),
+          Math.sign(finalPos[2]),
         ]);
 
         set((state) => ({
@@ -482,7 +624,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
             seq: ++craneOpCounter,
             pieceId: id,
             fromPos,
-            toPos: candidatePos,
+            toPos: finalPos,
             dims: target.dims,
           },
           history: [
@@ -580,11 +722,13 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
         pieces.map((p) => (p.id === id ? { ...p, position: candidatePos } : p))
       );
       const nextBlocks = deriveBlocksFromPieces(nextPieces);
+      const finalPos =
+        nextPieces.find((p) => p.id === id)?.position ?? candidatePos;
 
-      soundFX.playToggle(candidatePos[2] <= GRID_MAX, [
-        Math.sign(candidatePos[0]),
-        Math.sign(candidatePos[1]),
-        Math.sign(candidatePos[2]),
+      soundFX.playToggle(finalPos[2] <= GRID_MAX, [
+        Math.sign(finalPos[0]),
+        Math.sign(finalPos[1]),
+        Math.sign(finalPos[2]),
       ]);
 
       set((state) => ({
@@ -597,7 +741,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
           seq: ++craneOpCounter,
           pieceId: id,
           fromPos,
-          toPos: candidatePos,
+          toPos: finalPos,
           dims: target.dims,
         },
         history: [
