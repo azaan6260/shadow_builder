@@ -21,6 +21,21 @@ import {
   settlePiecesWithGravity,
 } from '../types/puzzle';
 import { soundFX } from '../utils/sound';
+import { mobileBridge } from '../utils/capacitorBridge';
+
+function getLevelMeta(levelId: string) {
+  const level = PUZZLE_LEVELS.find((l) => l.id === levelId) ?? PUZZLE_LEVELS[0];
+  return {
+    maxHeight: level.maxHeight ?? 5,
+    maxAllowedShaded: level.maxAllowedShaded ?? 0,
+    vipBalconies: (level.vipBalconies ?? []).map(([x, y]): [number, number] => [x, y]),
+    shadeSeekerBalconies: (level.shadeSeekerBalconies ?? []).map(
+      ([x, y]): [number, number] => [x, y]
+    ),
+    parMoves: level.parMoves ?? 20,
+    maxMoves: level.maxMoves ?? 32,
+  };
+}
 
 function instantiateLevelPieces(levelId: string): WallPiece[] {
   const level = PUZZLE_LEVELS.find((l) => l.id === levelId) ?? PUZZLE_LEVELS[0];
@@ -72,6 +87,18 @@ interface PuzzleStoreState {
   allowedFloorCells: Array<[number, number]>;
   /** Set of "x,z" strings for buildable floor cells inside the Central Building Zone */
   allowedFloorSet: Set<string>;
+  /** Batch 1: Zoning height cap in half-story block units */
+  maxHeight: number;
+  /** Batch 1: Permit quota — max regular balconies allowed to be ditched/shaded */
+  maxAllowedShaded: number;
+  /** Batch 1: Gold VIP balconies that can never be shaded */
+  vipBalconies: Array<[number, number]>;
+  /** Batch 1: Cool-Blue Shade-Seeker balconies that must be shaded */
+  shadeSeekerBalconies: Array<[number, number]>;
+  /** Batch 1: 3-star efficiency par move target */
+  parMoves: number;
+  /** Batch 1: Hard crane fuel move limit */
+  maxMoves: number;
   /** Phase 17: Most recent crane transfer operation for sequencing the 3D Tower Crane */
   lastCraneTransfer: CraneTransferOp | null;
   /** Whether the Tower Crane is currently moving a block into position */
@@ -151,6 +178,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
   const initialBlocks = deriveBlocksFromPieces(initialPieces);
   const initialAllowedCells = getLevelAllowedFloorCells(defaultLevelId);
   const initialAllowedSet = buildAllowedFloorSet(initialAllowedCells);
+  const initialMeta = getLevelMeta(defaultLevelId);
 
   return {
     activeLevelId: defaultLevelId,
@@ -159,6 +187,12 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
     windowCoordinates: getLevelWindowCoordinates(defaultLevelId),
     allowedFloorCells: initialAllowedCells,
     allowedFloorSet: initialAllowedSet,
+    maxHeight: initialMeta.maxHeight,
+    maxAllowedShaded: initialMeta.maxAllowedShaded,
+    vipBalconies: initialMeta.vipBalconies,
+    shadeSeekerBalconies: initialMeta.shadeSeekerBalconies,
+    parMoves: initialMeta.parMoves,
+    maxMoves: initialMeta.maxMoves,
     lastCraneTransfer: null,
     isCraneAnimating: false,
     targetShadow: getTargetShadow(initialPieces).targetShadow,
@@ -184,6 +218,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
       set({ selectedBlockId: id, selectedPieceId: id });
       if (id) {
         soundFX.playHover();
+        void mobileBridge.impactLight();
       }
     },
 
@@ -194,12 +229,26 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
       const next = pieces[(idx + 1) % pieces.length];
       set({ selectedBlockId: next.id, selectedPieceId: next.id });
       soundFX.playHover();
+      void mobileBridge.impactLight();
     },
 
     rotateSelectedPiece: (axis) => {
-      const { pieces, selectedBlockId, selectedPieceId, allowedFloorSet } = get();
+      const {
+        pieces,
+        selectedBlockId,
+        selectedPieceId,
+        allowedFloorSet,
+        maxHeight,
+        movesCount,
+        maxMoves,
+        hasWon,
+      } = get();
       const activeId = selectedBlockId ?? selectedPieceId;
       if (!activeId) return false;
+      if (!hasWon && movesCount >= maxMoves) {
+        void mobileBridge.notifyWarning();
+        return false;
+      }
 
       const target = pieces.find((p) => p.id === activeId);
       if (!target) return false;
@@ -332,7 +381,8 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
             activeId,
             candPos,
             nextDims,
-            allowedFloorSet
+            allowedFloorSet,
+            maxHeight
           )
         ) {
           continue;
@@ -383,6 +433,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
       }
 
       if (validCandidates.length === 0) {
+        void mobileBridge.notifyWarning();
         return false;
       }
 
@@ -437,6 +488,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
         axis === 'y' ? 1 : 0,
         axis === 'z' ? 1 : 0,
       ]);
+      void mobileBridge.impactMedium();
 
       set((state) => ({
         pieces: nextPieces,
@@ -463,9 +515,22 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
       preferLeftX = false,
       preferBackZ = false
     ) => {
-      const { pieces, selectedBlockId, selectedPieceId, allowedFloorSet } = get();
+      const {
+        pieces,
+        selectedBlockId,
+        selectedPieceId,
+        allowedFloorSet,
+        maxHeight,
+        movesCount,
+        maxMoves,
+        hasWon,
+      } = get();
       const activeId = selectedBlockId ?? selectedPieceId;
       if (!activeId) return false;
+      if (!hasWon && movesCount >= maxMoves) {
+        void mobileBridge.notifyWarning();
+        return false;
+      }
 
       const target = pieces.find((p) => p.id === activeId);
       if (!target) return false;
@@ -481,7 +546,8 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
           allowedFloorSet,
           preferLeftX,
           preferBackZ,
-          true
+          true,
+          maxHeight
         );
 
       // If position didn't change, just deselect
@@ -495,6 +561,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
       }
 
       if (!isValid) {
+        void mobileBridge.notifyWarning();
         return false;
       }
 
@@ -518,6 +585,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
         Math.sign(finalPos[1]),
         Math.sign(finalPos[2]),
       ]);
+      void mobileBridge.impactMedium();
 
       set((state) => ({
         pieces: nextPieces,
@@ -547,7 +615,11 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
     },
 
     nudgePiece: (id, delta) => {
-      const { pieces, allowedFloorSet } = get();
+      const { pieces, allowedFloorSet, maxHeight, movesCount, maxMoves, hasWon } = get();
+      if (!hasWon && movesCount >= maxMoves) {
+        void mobileBridge.notifyWarning();
+        return false;
+      }
       const target = pieces.find((p) => p.id === id);
       if (!target) return false;
 
@@ -598,9 +670,11 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
             id,
             candidatePos,
             target.dims,
-            allowedFloorSet
+            allowedFloorSet,
+            maxHeight
           )
         ) {
+          void mobileBridge.notifyWarning();
           return false;
         }
         const nextPieces = settlePiecesWithGravity(candidatePieces);
@@ -613,6 +687,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
           Math.sign(finalPos[1]),
           Math.sign(finalPos[2]),
         ]);
+        void mobileBridge.impactLight();
 
         set((state) => ({
           pieces: nextPieces,
@@ -650,9 +725,11 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
           id,
           candidatePos,
           target.dims,
-          allowedFloorSet
+          allowedFloorSet,
+          maxHeight
         )
       ) {
+        void mobileBridge.notifyWarning();
         return false;
       }
 
@@ -666,6 +743,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
         Math.sign(candidatePos[1]),
         Math.sign(candidatePos[2]),
       ]);
+      void mobileBridge.impactLight();
 
       set((state) => ({
         pieces: nextPieces,
@@ -692,7 +770,11 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
     },
 
     movePieceTo: (id, candidatePos) => {
-      const { pieces, allowedFloorSet } = get();
+      const { pieces, allowedFloorSet, maxHeight, movesCount, maxMoves, hasWon } = get();
+      if (!hasWon && movesCount >= maxMoves) {
+        void mobileBridge.notifyWarning();
+        return false;
+      }
       const target = pieces.find((p) => p.id === id);
       if (!target) return false;
 
@@ -712,9 +794,11 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
           id,
           candidatePos,
           target.dims,
-          allowedFloorSet
+          allowedFloorSet,
+          maxHeight
         )
       ) {
+        void mobileBridge.notifyWarning();
         return false;
       }
 
@@ -730,6 +814,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
         Math.sign(finalPos[1]),
         Math.sign(finalPos[2]),
       ]);
+      void mobileBridge.impactMedium();
 
       set((state) => ({
         pieces: nextPieces,
@@ -761,13 +846,21 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
       const freshBlocks = deriveBlocksFromPieces(fresh);
       const allowedCells = getLevelAllowedFloorCells(activeLevelId);
       const allowedSet = buildAllowedFloorSet(allowedCells);
+      const meta = getLevelMeta(activeLevelId);
       soundFX.playToggle(true, [0, 0, 0]);
+      void mobileBridge.impactLight();
       set((state) => ({
         pieces: fresh,
         blocks: freshBlocks,
         windowCoordinates: getLevelWindowCoordinates(activeLevelId),
         allowedFloorCells: allowedCells,
         allowedFloorSet: allowedSet,
+        maxHeight: meta.maxHeight,
+        maxAllowedShaded: meta.maxAllowedShaded,
+        vipBalconies: meta.vipBalconies,
+        shadeSeekerBalconies: meta.shadeSeekerBalconies,
+        parMoves: meta.parMoves,
+        maxMoves: meta.maxMoves,
         lastCraneTransfer: null,
         isCraneAnimating: false,
         targetShadow: getTargetShadow(fresh).targetShadow,
@@ -791,7 +884,9 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
       const freshBlocks = deriveBlocksFromPieces(fresh);
       const allowedCells = getLevelAllowedFloorCells(levelId);
       const allowedSet = buildAllowedFloorSet(allowedCells);
+      const meta = getLevelMeta(levelId);
       soundFX.playToggle(true, [0, 1, 0]);
+      void mobileBridge.impactLight();
       set({
         activeLevelId: levelId,
         pieces: fresh,
@@ -799,6 +894,12 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
         windowCoordinates: getLevelWindowCoordinates(levelId),
         allowedFloorCells: allowedCells,
         allowedFloorSet: allowedSet,
+        maxHeight: meta.maxHeight,
+        maxAllowedShaded: meta.maxAllowedShaded,
+        vipBalconies: meta.vipBalconies,
+        shadeSeekerBalconies: meta.shadeSeekerBalconies,
+        parMoves: meta.parMoves,
+        maxMoves: meta.maxMoves,
         lastCraneTransfer: null,
         isCraneAnimating: false,
         targetShadow: getTargetShadow(fresh).targetShadow,
@@ -821,6 +922,7 @@ export const usePuzzleStore = create<PuzzleStoreState>((set, get) => {
         const nextHistory = state.history.slice(0, -1);
         const nextBlocksHistory = state.blocksHistory.slice(0, -1);
         soundFX.playToggle(true, [0, 0, 0]);
+        void mobileBridge.impactLight();
         return {
           pieces: lastSnapshot.pieces,
           blocks: lastSnapshot.blocks,

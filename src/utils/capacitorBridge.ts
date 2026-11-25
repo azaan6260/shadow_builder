@@ -117,6 +117,15 @@ class NativeMobileBridge {
       // Ignore haptic errors
     }
   }
+
+  public async notifyWarning(): Promise<void> {
+    if (!this.isNative()) return;
+    try {
+      await Haptics.notification({ type: NotificationType.Warning });
+    } catch {
+      // Ignore haptic errors
+    }
+  }
 }
 
 export const mobileBridge = new NativeMobileBridge();

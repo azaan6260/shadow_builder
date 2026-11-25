@@ -6,6 +6,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import confetti from 'canvas-confetti';
 import {
+  AlertTriangle,
   ArrowDown,
   ArrowLeft,
   ArrowRight,
@@ -18,6 +19,8 @@ import {
   Grid,
   Rotate3d,
   RotateCcw,
+  Star,
+  Sun,
   Undo2,
   Volume2,
   VolumeX,
@@ -27,17 +30,20 @@ import {
   BLOCK_SPACING,
   CameraPresetId,
   GlassThemeId,
-  LIGHT_POSITION,
   PUZZLE_LEVELS,
   checkWinCondition,
-  isBalconyShadedByBlocks,
-  isPieceInCentralZone,
-  projectAngledShadow,
 } from './types/puzzle';
 import { CubeClusterScene } from './components/CubeClusterScene';
 import { MobileGameControls } from './components/MobileGameControls';
 import { usePuzzleStore } from './store/usePuzzleStore';
 import { mobileBridge } from './utils/capacitorBridge';
+import {
+  LevelProgressMap,
+  calculateStarRating,
+  getTotalEarnedStars,
+  loadLevelProgress,
+  saveLevelCompletion,
+} from './utils/progressStorage';
 import { soundFX } from './utils/sound';
 
 export default function App() {
@@ -46,9 +52,12 @@ export default function App() {
   const blocks = usePuzzleStore((s) => s.blocks);
   const windowCoordinates = usePuzzleStore((s) => s.windowCoordinates);
   const allowedFloorSet = usePuzzleStore((s) => s.allowedFloorSet);
-  const targetShadow = usePuzzleStore((s) => s.targetShadow);
-  const targetWallShape = usePuzzleStore((s) => s.targetWallShape);
-  const targetFloorShape = usePuzzleStore((s) => s.targetFloorShape);
+  const maxHeight = usePuzzleStore((s) => s.maxHeight);
+  const maxAllowedShaded = usePuzzleStore((s) => s.maxAllowedShaded);
+  const vipBalconies = usePuzzleStore((s) => s.vipBalconies);
+  const shadeSeekerBalconies = usePuzzleStore((s) => s.shadeSeekerBalconies);
+  const parMoves = usePuzzleStore((s) => s.parMoves);
+  const maxMoves = usePuzzleStore((s) => s.maxMoves);
   const hasWon = usePuzzleStore((s) => s.hasWon);
   const setHasWon = usePuzzleStore((s) => s.setHasWon);
   const selectedBlockId = usePuzzleStore((s) => s.selectedBlockId);
@@ -70,12 +79,15 @@ export default function App() {
 
   const [modalDismissedForView, setModalDismissedForView] = useState<boolean>(false);
   const [levelDrawerOpen, setLevelDrawerOpen] = useState<boolean>(false);
+  const [showSunRays, setShowSunRays] = useState<boolean>(false);
+  const [levelProgress, setLevelProgress] = useState<LevelProgressMap>(() => loadLevelProgress());
   const [themeId] = useState<GlassThemeId>('cyan');
   const [dragPlaneMode] = useState<'XY' | 'XZ'>('XY');
   const [activeCameraPreset, setActiveCameraPreset] = useState<CameraPresetId | null>('iso-ne');
   const [isMuted, setIsMuted] = useState<boolean>(soundFX.isMuted);
 
   const solvedCelebratedRef = useRef<string | null>(null);
+  const outOfMovesNotifiedRef = useRef<boolean>(false);
 
   // Safety fallback timer so isCraneAnimating never stays true if a spring animation is interrupted
   useEffect(() => {
@@ -113,55 +125,69 @@ export default function App() {
 
   const activeSelectedId = selectedBlockId ?? selectedPieceId;
 
-  // Evaluate Right to Light balcony status, limited foundation placement, and 40° sun shadow projections
+  // Evaluate Right to Light balcony roles (VIP, Shade-Seeker, Ditch Permit), Zoning Height Cap & 40° shadows
   const winStatus = useMemo(
-    () => checkWinCondition(pieces, windowCoordinates, allowedFloorSet),
-    [pieces, windowCoordinates, allowedFloorSet]
+    () =>
+      checkWinCondition(pieces, windowCoordinates, allowedFloorSet, {
+        maxHeight,
+        maxAllowedShaded,
+        vipBalconies,
+        shadeSeekerBalconies,
+      }),
+    [
+      pieces,
+      windowCoordinates,
+      allowedFloorSet,
+      maxHeight,
+      maxAllowedShaded,
+      vipBalconies,
+      shadeSeekerBalconies,
+    ]
   );
 
-  // Phase 16: The "Right to Light" Analytical Win Condition (40° Single Sun + Balcony Residents + Limited Foundation Pads)
+  // Synchronize store win flag directly with the unified Batch 1 analytical validator
   useEffect(() => {
-    const visibleBlocks = blocks.filter((block) => block.visible === true);
-    const centralZoneBlocks = visibleBlocks.filter(
-      (block) => block.z >= -2 && block.z <= 2
-    );
+    setHasWon(winStatus.isWin);
+  }, [winStatus.isWin, setHasWon]);
 
-    // 1. Check if the 40° Sun shadow from any central zone block hits any balcony resident
-    const shadedBalconies = windowCoordinates.filter(([wx, wy]) =>
-      isBalconyShadedByBlocks(wx, wy, centralZoneBlocks, LIGHT_POSITION)
-    );
-    const zeroBalconiesShaded = shadedBalconies.length === 0;
+  const earnedStars = useMemo(
+    () =>
+      calculateStarRating(
+        movesCount,
+        parMoves,
+        winStatus.shadedRegularBalconies.length,
+        maxAllowedShaded
+      ),
+    [movesCount, parMoves, winStatus.shadedRegularBalconies.length, maxAllowedShaded]
+  );
 
-    // 2. Staging Area & Limited Buildable Pads Check: Have all modular blocks been placed on valid foundation pads?
-    const allBlocksStackedInCentralZone =
-      pieces.length > 0 &&
-      pieces.every((piece) => isPieceInCentralZone(piece, allowedFloorSet));
+  const totalEarnedStars = useMemo(
+    () => getTotalEarnedStars(levelProgress),
+    [levelProgress]
+  );
 
-    // Also compute 40° angled floor projection
-    projectAngledShadow(centralZoneBlocks, LIGHT_POSITION);
+  const movesRemaining = Math.max(0, maxMoves - movesCount);
+  const isOutOfMoves = !hasWon && !isCraneAnimating && movesCount >= maxMoves;
 
-    const matchedRightToLightWin =
-      allBlocksStackedInCentralZone && zeroBalconiesShaded && winStatus.isWin;
+  // Fire subtle warning haptic once when the player exhausts the level's crane move budget
+  useEffect(() => {
+    if (isOutOfMoves && !outOfMovesNotifiedRef.current) {
+      outOfMovesNotifiedRef.current = true;
+      void mobileBridge.notifyWarning();
+    } else if (!isOutOfMoves) {
+      outOfMovesNotifiedRef.current = false;
+    }
+  }, [isOutOfMoves]);
 
-    setHasWon(matchedRightToLightWin);
-  }, [
-    blocks,
-    pieces,
-    windowCoordinates,
-    allowedFloorSet,
-    targetShadow,
-    targetWallShape,
-    targetFloorShape,
-    winStatus.isWin,
-    setHasWon,
-  ]);
-
-  // Trigger celebration and score modal ONLY after the final block finishes moving to its selected position
+  // Trigger celebration, star persistence, haptics, and score modal ONLY after the final crane drop finishes
   useEffect(() => {
     if (hasWon && !isCraneAnimating && solvedCelebratedRef.current !== activeLevel.id) {
       solvedCelebratedRef.current = activeLevel.id;
       setModalDismissedForView(false);
+      const updatedProgress = saveLevelCompletion(activeLevel.id, earnedStars, movesCount);
+      setLevelProgress(updatedProgress);
       soundFX.playPuzzleSolved();
+      void mobileBridge.notifySuccess();
       try {
         confetti({
           particleCount: 75,
@@ -175,12 +201,13 @@ export default function App() {
       solvedCelebratedRef.current = null;
       setModalDismissedForView(false);
     }
-  }, [hasWon, isCraneAnimating, activeLevel.id]);
+  }, [hasWon, isCraneAnimating, activeLevel.id, earnedStars, movesCount]);
 
   const handleSelectLevel = useCallback(
     (levelId: string) => {
       setLevel(levelId);
       solvedCelebratedRef.current = null;
+      outOfMovesNotifiedRef.current = false;
       setModalDismissedForView(false);
       setLevelDrawerOpen(false);
     },
@@ -219,7 +246,12 @@ export default function App() {
     [activeSelectedId, pieces, selectPiece, rotateSelectedPiece]
   );
 
-  // Keyboard shortcuts for desktop users (including X, Y, C / 1, 2, 3 for 3-axis rotation)
+  const handleToggleSunRays = useCallback(() => {
+    setShowSunRays((prev) => !prev);
+    void mobileBridge.impactLight();
+  }, []);
+
+  // Keyboard shortcuts for desktop users (including X, Y, C / 1, 2, 3 for 3-axis rotation and V for Sun Rays)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
@@ -263,18 +295,106 @@ export default function App() {
         resetLevel();
       } else if (e.key === 'm' || e.key === 'M') {
         soundFX.toggleMute();
+      } else if (e.key === 'v' || e.key === 'V') {
+        handleToggleSunRays();
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [cycleSelectedPiece, handleRotateAxis, handleNudgeSelected, undo, resetLevel]);
+  }, [
+    cycleSelectedPiece,
+    handleRotateAxis,
+    handleNudgeSelected,
+    handleToggleSunRays,
+    undo,
+    resetLevel,
+  ]);
 
-  const sunlitWindows = windowCoordinates.length - winStatus.blockedWindows.length;
+  const activeLevelRecord = levelProgress[activeLevel.id];
+
+  // Build concise, high-signal balcony status string & tone for desktop header and mobile status strip
+  const balconyRuleStatus = useMemo(() => {
+    if (winStatus.shadedVipBalconies.length > 0) {
+      return {
+        label: `${winStatus.shadedVipBalconies.length} VIP Shaded`,
+        shortLabel: `${winStatus.shadedVipBalconies.length} VIP!`,
+        className: 'text-rose-400 font-bold',
+      };
+    }
+    if (winStatus.shadedRegularBalconies.length > maxAllowedShaded) {
+      const overBy = winStatus.shadedRegularBalconies.length - maxAllowedShaded;
+      return {
+        label:
+          maxAllowedShaded > 0
+            ? `Ditch ${winStatus.shadedRegularBalconies.length}/${maxAllowedShaded}`
+            : `${overBy} Angry`,
+        shortLabel:
+          maxAllowedShaded > 0
+            ? `Ditch ${winStatus.shadedRegularBalconies.length}/${maxAllowedShaded}`
+            : `${overBy} Angry`,
+        className: 'text-rose-400 font-bold',
+      };
+    }
+    if (winStatus.unsatisfiedShadeSeekers.length > 0) {
+      return {
+        label: `Shade ${winStatus.satisfiedShadeSeekers.length}/${shadeSeekerBalconies.length}`,
+        shortLabel: `Shade ${winStatus.satisfiedShadeSeekers.length}/${shadeSeekerBalconies.length}`,
+        className: 'text-orange-300 font-semibold',
+      };
+    }
+    return {
+      label: `${winStatus.happyBalconiesCount}/${windowCoordinates.length} Happy`,
+      shortLabel: `${winStatus.happyBalconiesCount}/${windowCoordinates.length} OK`,
+      className: 'text-emerald-300 font-semibold',
+    };
+  }, [
+    winStatus.shadedVipBalconies.length,
+    winStatus.shadedRegularBalconies.length,
+    winStatus.unsatisfiedShadeSeekers.length,
+    winStatus.satisfiedShadeSeekers.length,
+    winStatus.happyBalconiesCount,
+    maxAllowedShaded,
+    shadeSeekerBalconies.length,
+    windowCoordinates.length,
+  ]);
+
+  const movesToneClass =
+    movesRemaining === 0
+      ? 'text-rose-400 font-bold'
+      : movesRemaining <= 5
+      ? 'text-amber-300 font-bold'
+      : 'text-slate-200 font-semibold';
+
+  const levelClearedSubtitle = useMemo(() => {
+    const cleanTitle = activeLevel.title.replace(/^\d+\.\s*/, '');
+    const details: string[] = [`under the ${maxHeight}F zoning cap`];
+    if (shadeSeekerBalconies.length > 0) {
+      details.push(
+        `cooled ${shadeSeekerBalconies.length} Shade-Seeker${shadeSeekerBalconies.length > 1 ? 's' : ''}`
+      );
+    }
+    if (vipBalconies.length > 0) {
+      details.push(`protected all Gold VIP balconies`);
+    }
+    if (maxAllowedShaded > 0 && winStatus.shadedRegularBalconies.length > 0) {
+      details.push(
+        `used ${winStatus.shadedRegularBalconies.length}/${maxAllowedShaded} ditch permit`
+      );
+    }
+    return `${cleanTitle} — Stacked every unit ${details.join(', ')}.`;
+  }, [
+    activeLevel.title,
+    maxHeight,
+    shadeSeekerBalconies.length,
+    vipBalconies.length,
+    maxAllowedShaded,
+    winStatus.shadedRegularBalconies.length,
+  ]);
 
   return (
     <div className="relative w-full h-full overflow-hidden bg-[#bae6fd] select-none">
       {/* Top Bar — Large, high-visibility touch buttons on mobile + full controls on desktop */}
-      <header className="fixed top-0 left-0 right-0 z-20 flex items-center justify-between gap-2 sm:gap-4 px-2.5 sm:px-5 h-13 sm:h-14 bg-[#090d16]/95 border-b border-slate-800/90 shadow-lg pointer-events-auto">
+      <header className="fixed top-0 left-0 right-0 z-20 flex items-center justify-between gap-2 sm:gap-3 px-2.5 sm:px-5 h-13 sm:h-14 bg-[#090d16]/95 border-b border-slate-800/90 shadow-lg pointer-events-auto">
         {/* Zone 1: Wordmark */}
         <a
           href="#top"
@@ -287,17 +407,17 @@ export default function App() {
           PrismGrid 3D
         </a>
 
-        {/* Zone 2: High-Visibility 20-Level Navigation + Right-to-Light Telemetry */}
+        {/* Zone 2: High-Visibility 20-Level Navigation + Unboxed Right-to-Light Telemetry */}
         <nav className="flex items-center gap-1.5 sm:gap-3 text-xs sm:text-sm font-medium text-slate-300 min-w-0">
           <div className="flex items-center gap-1 rounded-xl bg-slate-900 border border-slate-700 p-1">
             <button
               type="button"
               data-testid="prev-level-button"
               onClick={handlePrevLevel}
-              className="p-1.5 sm:p-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 active:scale-95 text-slate-200 hover:text-white transition-all cursor-pointer"
+              className="p-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 active:scale-95 text-slate-200 hover:text-white transition-all cursor-pointer"
               title="Previous Level"
             >
-              <ChevronLeft className="w-4 h-4 sm:w-4 sm:h-4" />
+              <ChevronLeft className="w-4 h-4" />
             </button>
 
             <button
@@ -311,7 +431,7 @@ export default function App() {
               <span className="font-mono-tabular text-xs sm:text-sm font-bold">
                 Lvl {activeLevel.number}/{PUZZLE_LEVELS.length}
               </span>
-              <span className="hidden lg:inline text-slate-200 font-normal text-xs max-w-[175px] truncate">
+              <span className="hidden xl:inline text-slate-200 font-normal text-xs max-w-[155px] truncate">
                 — {activeLevel.title.replace(/^\d+\.\s*/, '')}
               </span>
             </button>
@@ -320,37 +440,60 @@ export default function App() {
               type="button"
               data-testid="next-level-nav-button"
               onClick={handleNextLevel}
-              className="p-1.5 sm:p-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 active:scale-95 text-slate-200 hover:text-white transition-all cursor-pointer"
+              className="p-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 active:scale-95 text-slate-200 hover:text-white transition-all cursor-pointer"
               title="Next Level"
             >
-              <ChevronRight className="w-4 h-4 sm:w-4 sm:h-4" />
+              <ChevronRight className="w-4 h-4" />
             </button>
           </div>
 
-          <div className="hidden md:flex items-center gap-1.5 font-mono-tabular text-xs whitespace-nowrap shrink-0 px-2.5 py-1 rounded-lg bg-slate-900/80 border border-slate-800">
-            <span className="text-slate-200 font-semibold">
-              {winStatus.placedPiecesCount}/{winStatus.totalPieces} Stacked
+          <div
+            data-testid="desktop-hud-telemetry"
+            className="hidden md:flex items-center gap-2 font-mono-tabular text-xs whitespace-nowrap shrink-0 text-slate-300"
+          >
+            <span className="text-slate-100 font-semibold">
+              {winStatus.placedPiecesCount}/{winStatus.totalPieces} Blks
+            </span>
+            <span aria-hidden="true" className="text-slate-600">
+              ·
+            </span>
+            <span className={movesToneClass} title={`Par ${parMoves} moves for 3 stars`}>
+              Moves {movesCount}/{maxMoves}
             </span>
             <span aria-hidden="true" className="text-slate-600">
               ·
             </span>
             <span
               className={
-                winStatus.blockedWindows.length === 0
-                  ? 'text-amber-300 font-semibold'
-                  : 'text-rose-400 font-bold'
+                winStatus.isHeightValid ? 'text-cyan-300 font-semibold' : 'text-rose-400 font-bold'
               }
+              title={`Zoning height cap: ${maxHeight} half-story levels`}
             >
-              {winStatus.blockedWindows.length === 0
-                ? `${sunlitWindows}/${windowCoordinates.length} Happy`
-                : `${winStatus.blockedWindows.length} Angry`}
+              Cap {maxHeight}F
             </span>
+            <span aria-hidden="true" className="text-slate-600">
+              ·
+            </span>
+            <span className={balconyRuleStatus.className}>{balconyRuleStatus.label}</span>
+            {maxAllowedShaded > 0 && winStatus.shadedRegularBalconies.length <= maxAllowedShaded && (
+              <>
+                <span aria-hidden="true" className="text-slate-600 hidden lg:inline">
+                  ·
+                </span>
+                <span
+                  className="hidden lg:inline text-amber-300/90 font-medium"
+                  title="Permit allows ditching up to 1 regular non-VIP balcony"
+                >
+                  Ditch {winStatus.shadedRegularBalconies.length}/{maxAllowedShaded}
+                </span>
+              </>
+            )}
           </div>
         </nav>
 
-        {/* Zone 3: Desktop Shift & 3-Axis Rotation + Always-Visible Audio, Undo & Reset */}
+        {/* Zone 3: Desktop Shift & 3-Axis Rotation + Always-Visible Sun Rays, Audio, Undo & Reset */}
         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-          {/* Desktop Left / Right / Back / Forward Shift Controls (Shown on sm+ screens; on mobile, large dock at bottom) */}
+          {/* Desktop Left / Right / Back / Forward Shift Controls */}
           <div
             className="hidden sm:flex items-center gap-1 px-1.5 py-1 rounded-xl bg-slate-900 border border-slate-700"
             title="Slide selected block Left (-X), Right (+X), Back (-Z), or Forward (+Z) on top of support blocks"
@@ -359,9 +502,9 @@ export default function App() {
               type="button"
               data-testid="nudge-left-button"
               onClick={() => handleNudgeSelected([-1, 0, 0])}
-              disabled={!activeSelectedId}
+              disabled={!activeSelectedId || isOutOfMoves}
               className={`p-1.5 rounded-lg transition-colors ${
-                activeSelectedId
+                activeSelectedId && !isOutOfMoves
                   ? 'bg-emerald-500/20 hover:bg-emerald-500/35 text-emerald-300 border border-emerald-400/40 cursor-pointer'
                   : 'bg-slate-800/40 text-slate-600 border border-transparent cursor-not-allowed'
               }`}
@@ -373,9 +516,9 @@ export default function App() {
               type="button"
               data-testid="nudge-right-button"
               onClick={() => handleNudgeSelected([1, 0, 0])}
-              disabled={!activeSelectedId}
+              disabled={!activeSelectedId || isOutOfMoves}
               className={`p-1.5 rounded-lg transition-colors ${
-                activeSelectedId
+                activeSelectedId && !isOutOfMoves
                   ? 'bg-emerald-500/20 hover:bg-emerald-500/35 text-emerald-300 border border-emerald-400/40 cursor-pointer'
                   : 'bg-slate-800/40 text-slate-600 border border-transparent cursor-not-allowed'
               }`}
@@ -387,9 +530,9 @@ export default function App() {
               type="button"
               data-testid="nudge-back-button"
               onClick={() => handleNudgeSelected([0, 0, -1])}
-              disabled={!activeSelectedId}
+              disabled={!activeSelectedId || isOutOfMoves}
               className={`p-1.5 rounded-lg transition-colors ${
-                activeSelectedId
+                activeSelectedId && !isOutOfMoves
                   ? 'bg-emerald-500/20 hover:bg-emerald-500/35 text-emerald-300 border border-emerald-400/40 cursor-pointer'
                   : 'bg-slate-800/40 text-slate-600 border border-transparent cursor-not-allowed'
               }`}
@@ -401,9 +544,9 @@ export default function App() {
               type="button"
               data-testid="nudge-forward-button"
               onClick={() => handleNudgeSelected([0, 0, 1])}
-              disabled={!activeSelectedId}
+              disabled={!activeSelectedId || isOutOfMoves}
               className={`p-1.5 rounded-lg transition-colors ${
-                activeSelectedId
+                activeSelectedId && !isOutOfMoves
                   ? 'bg-emerald-500/20 hover:bg-emerald-500/35 text-emerald-300 border border-emerald-400/40 cursor-pointer'
                   : 'bg-slate-800/40 text-slate-600 border border-transparent cursor-not-allowed'
               }`}
@@ -413,7 +556,7 @@ export default function App() {
             </button>
           </div>
 
-          {/* Desktop 3-Axis Block Rotation Group (Shown on sm+ screens; on mobile, large dock at bottom) */}
+          {/* Desktop 3-Axis Block Rotation Group */}
           <div
             className="hidden sm:flex items-center gap-1 px-1.5 py-1 rounded-xl bg-slate-900 border border-slate-700"
             title="Select a block and rotate it 90° around the X, Y, or Z axis"
@@ -425,9 +568,9 @@ export default function App() {
                 type="button"
                 data-testid={`rotate-${axis}-button`}
                 onClick={() => handleRotateAxis(axis)}
-                disabled={!activeSelectedId}
-                className={`px-2.5 py-1 rounded-lg text-xs font-mono-tabular font-bold transition-colors whitespace-nowrap ${
-                  activeSelectedId
+                disabled={!activeSelectedId || isOutOfMoves}
+                className={`px-2 py-1 rounded-lg text-xs font-mono-tabular font-bold transition-colors whitespace-nowrap ${
+                  activeSelectedId && !isOutOfMoves
                     ? 'bg-sky-500/25 hover:bg-sky-500/40 text-sky-200 border border-sky-400/50 cursor-pointer'
                     : 'bg-slate-800/50 text-slate-500 border border-transparent cursor-not-allowed'
                 }`}
@@ -437,6 +580,24 @@ export default function App() {
               </button>
             ))}
           </div>
+
+          {/* 40° Sun Rays Vision Toggle */}
+          <button
+            type="button"
+            data-testid="sun-rays-toggle-button"
+            onClick={handleToggleSunRays}
+            aria-pressed={showSunRays}
+            aria-label={showSunRays ? 'Hide 40° Sun Rays' : 'Show 40° Sun Rays'}
+            className={`flex items-center justify-center gap-1.5 min-w-[38px] min-h-[38px] px-2.5 py-2 rounded-xl text-xs font-semibold border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+              showSunRays
+                ? 'bg-amber-400/20 hover:bg-amber-400/30 text-amber-300 border-amber-400/60'
+                : 'bg-slate-900 hover:bg-slate-800 text-slate-300 border-slate-700'
+            }`}
+            title="Toggle 40° Sun Ray Corridors (Shortcut: V)"
+          >
+            <Sun className={`w-4 h-4 ${showSunRays ? 'text-amber-300' : 'text-slate-400'}`} />
+            <span className="hidden xl:inline">Rays</span>
+          </button>
 
           <button
             type="button"
@@ -459,9 +620,7 @@ export default function App() {
             ) : (
               <Volume2 className="w-4 h-4 text-emerald-400" />
             )}
-            <span className="hidden md:inline">
-              {isMuted ? 'Muted' : 'Audio'}
-            </span>
+            <span className="hidden xl:inline">{isMuted ? 'Muted' : 'Audio'}</span>
           </button>
 
           <button
@@ -477,44 +636,58 @@ export default function App() {
             title="Undo last step (Shortcut: Z)"
           >
             <Undo2 className="w-4 h-4" />
-            <span className="hidden lg:inline">Undo</span>
+            <span className="hidden xl:inline">Undo</span>
           </button>
 
           <button
             type="button"
             onClick={resetLevel}
-            className="flex items-center justify-center gap-1.5 min-w-[38px] min-h-[38px] px-3 py-2 text-xs font-bold text-slate-950 bg-sky-400 rounded-xl hover:bg-sky-300 active:scale-95 transition-all cursor-pointer whitespace-nowrap shrink-0 shadow-md"
+            className="flex items-center justify-center gap-1.5 min-w-[38px] min-h-[38px] px-2.5 sm:px-3 py-2 text-xs font-bold text-slate-950 bg-sky-400 rounded-xl hover:bg-sky-300 active:scale-95 transition-all cursor-pointer whitespace-nowrap shrink-0 shadow-md"
             title="Reset Level (Shortcut: R)"
           >
             <RotateCcw className="w-4 h-4" />
-            <span className="hidden lg:inline">Reset</span>
+            <span className="hidden xl:inline">Reset</span>
           </button>
         </div>
       </header>
 
       {/* Mobile Slim Status Strip directly under Header (Clean unboxed status + Next Block action) */}
-      <div className="sm:hidden fixed top-13 left-0 right-0 z-10 flex items-center justify-between px-3 py-1 bg-[#090d16]/80 backdrop-blur-sm border-b border-slate-800/80 text-[11px] font-mono-tabular pointer-events-auto">
-        <div className="flex items-center gap-2 whitespace-nowrap">
-          <span className="text-slate-200 font-semibold">
-            {winStatus.placedPiecesCount}/{winStatus.totalPieces} Stacked
+      <div className="sm:hidden fixed top-13 left-0 right-0 z-10 flex items-center justify-between gap-2 px-3 py-1 bg-[#090d16]/85 backdrop-blur-sm border-b border-slate-800/80 text-[11px] font-mono-tabular pointer-events-auto">
+        <div className="flex items-center gap-1.5 whitespace-nowrap overflow-x-auto">
+          <span className="text-slate-100 font-semibold">
+            {winStatus.placedPiecesCount}/{winStatus.totalPieces}
           </span>
-          <span className="text-slate-600" aria-hidden="true">·</span>
-          <span
-            className={
-              winStatus.blockedWindows.length === 0
-                ? 'text-amber-300 font-semibold'
-                : 'text-rose-400 font-bold'
-            }
-          >
-            {winStatus.blockedWindows.length === 0
-              ? `${sunlitWindows}/${windowCoordinates.length} Happy`
-              : `${winStatus.blockedWindows.length} Angry`}
+          <span className="text-slate-600" aria-hidden="true">
+            ·
           </span>
+          <span className={movesToneClass}>
+            M {movesCount}/{maxMoves}
+          </span>
+          <span className="text-slate-600" aria-hidden="true">
+            ·
+          </span>
+          <span className={winStatus.isHeightValid ? 'text-cyan-300' : 'text-rose-400 font-bold'}>
+            {maxHeight}F
+          </span>
+          <span className="text-slate-600" aria-hidden="true">
+            ·
+          </span>
+          <span className={balconyRuleStatus.className}>{balconyRuleStatus.shortLabel}</span>
+          {maxAllowedShaded > 0 && winStatus.shadedRegularBalconies.length <= maxAllowedShaded && (
+            <>
+              <span className="text-slate-600" aria-hidden="true">
+                ·
+              </span>
+              <span className="text-amber-300/90">
+                D {winStatus.shadedRegularBalconies.length}/{maxAllowedShaded}
+              </span>
+            </>
+          )}
         </div>
         <button
           type="button"
           onClick={cycleSelectedPiece}
-          className="px-2.5 py-0.5 rounded-lg bg-slate-800/90 border border-slate-600 text-sky-300 font-semibold active:scale-95 transition-transform cursor-pointer whitespace-nowrap"
+          className="px-2.5 py-0.5 rounded-lg bg-slate-800/90 border border-slate-600 text-sky-300 font-semibold active:scale-95 transition-transform cursor-pointer whitespace-nowrap shrink-0"
         >
           {activeSelectedId ? 'Next Block' : 'Select Block'}
         </button>
@@ -522,7 +695,7 @@ export default function App() {
 
       {/* Mobile Dual-Corner Round Controls: Bottom-Left Move Joystick & Bottom-Right Rotate Wheel */}
       <MobileGameControls
-        hasSelectedBlock={Boolean(activeSelectedId)}
+        hasSelectedBlock={Boolean(activeSelectedId) && !isOutOfMoves}
         onMove={handleNudgeSelected}
         onRotate={handleRotateAxis}
       />
@@ -543,8 +716,15 @@ export default function App() {
           >
             <div className="flex items-center justify-between gap-3 pb-3 mb-4 border-b border-slate-800">
               <div>
-                <div className="text-[10px] sm:text-xs font-mono-tabular uppercase tracking-widest text-sky-400 font-semibold">
-                  Right to Light Campaign
+                <div className="flex items-center gap-2 text-[10px] sm:text-xs font-mono-tabular uppercase tracking-widest font-semibold">
+                  <span className="text-sky-400">Right to Light Campaign</span>
+                  <span aria-hidden="true" className="text-slate-600">
+                    ·
+                  </span>
+                  <span className="inline-flex items-center gap-1 text-amber-300">
+                    <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
+                    {totalEarnedStars} / {PUZZLE_LEVELS.length * 3}
+                  </span>
                 </div>
                 <h2 className="font-display text-lg sm:text-xl font-bold text-white">
                   Select Architectural Level (01 – {PUZZLE_LEVELS.length})
@@ -563,9 +743,14 @@ export default function App() {
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
               {PUZZLE_LEVELS.map((lvl) => {
                 const isCurrent = lvl.id === activeLevelId;
-                const forwardSlotsCount = lvl.allowedFloorCells.filter(
-                  ([, fz]) => fz >= -1
-                ).length;
+                const rec = levelProgress[lvl.id];
+                const bestStars = rec?.bestStars ?? 0;
+                const rulesSummary: string[] = [];
+                if ((lvl.vipBalconies?.length ?? 0) > 0) rulesSummary.push('VIP');
+                if ((lvl.shadeSeekerBalconies?.length ?? 0) > 0) rulesSummary.push('Shade');
+                const ditchQuota = lvl.maxAllowedShaded ?? 0;
+                if (ditchQuota > 0) rulesSummary.push(`${ditchQuota} Ditch`);
+
                 return (
                   <button
                     key={lvl.id}
@@ -582,19 +767,105 @@ export default function App() {
                       <span className="font-mono-tabular text-xs font-bold text-sky-400">
                         LVL {lvl.number}
                       </span>
-                      <span className="font-mono-tabular text-[10px] text-amber-300">
-                        {lvl.pieces.length} Blocks
-                      </span>
+                      <div className="flex items-center gap-0.5" aria-label={`${bestStars} of 3 stars`}>
+                        {[1, 2, 3].map((starIdx) => (
+                          <Star
+                            key={starIdx}
+                            className={`w-3 h-3 ${
+                              starIdx <= bestStars
+                                ? 'fill-amber-400 text-amber-400'
+                                : 'text-slate-700'
+                            }`}
+                          />
+                        ))}
+                      </div>
                     </div>
                     <div className="font-semibold text-xs text-white line-clamp-1">
                       {lvl.title.replace(/^\d+\.\s*/, '')}
                     </div>
                     <div className="mt-1 font-mono-tabular text-[10px] text-slate-400">
-                      {forwardSlotsCount} Tower Slots · {lvl.windowCoordinates.length} Balconies
+                      Cap {lvl.maxHeight ?? 5}F · Par {lvl.parMoves ?? 20} · {lvl.pieces.length} Blks
                     </div>
+                    {rulesSummary.length > 0 && (
+                      <div className="mt-0.5 font-mono-tabular text-[10px] text-amber-300/90">
+                        {rulesSummary.join(' · ')}
+                      </div>
+                    )}
                   </button>
                 );
               })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Out of Crane Moves Modal */}
+      {isOutOfMoves && !levelDrawerOpen && (
+        <div
+          data-testid="out-of-moves-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="out-of-moves-title"
+          className="fixed inset-0 z-30 flex items-center justify-center p-3 sm:p-4 bg-black/75 pointer-events-auto"
+        >
+          <div className="w-full max-w-md rounded-2xl bg-[#0f172a] border border-rose-500/40 shadow-2xl p-5 sm:p-6 text-center">
+            <div className="mx-auto mb-3 w-12 h-12 rounded-xl bg-rose-500/15 border border-rose-500/40 flex items-center justify-center">
+              <AlertTriangle className="w-6 h-6 text-rose-400" />
+            </div>
+
+            <div className="text-[11px] font-mono-tabular font-semibold uppercase tracking-widest text-rose-400 mb-1">
+              Crane Budget Exhausted
+            </div>
+            <h2
+              id="out-of-moves-title"
+              className="font-display text-xl sm:text-2xl font-bold text-white tracking-tight"
+            >
+              Out of Crane Moves
+            </h2>
+            <p className="mt-1.5 text-xs sm:text-sm text-slate-300">
+              You used all {maxMoves} crane moves on Level {activeLevel.number}. Undo a step to
+              re-route your tower or retry cleanly for 3 stars.
+            </p>
+
+            <div className="mt-4 flex items-center justify-center gap-3 font-mono-tabular text-xs text-slate-400">
+              <span>
+                Stacked {winStatus.placedPiecesCount}/{winStatus.totalPieces}
+              </span>
+              <span aria-hidden="true" className="text-slate-600">
+                ·
+              </span>
+              <span>Cap {maxHeight}F</span>
+              <span aria-hidden="true" className="text-slate-600">
+                ·
+              </span>
+              <span className={balconyRuleStatus.className}>{balconyRuleStatus.label}</span>
+            </div>
+
+            <div className="mt-5 flex items-center justify-center gap-3">
+              <button
+                type="button"
+                data-testid="out-of-moves-undo-button"
+                onClick={undo}
+                disabled={history.length === 0}
+                className={`flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold border transition-colors whitespace-nowrap ${
+                  history.length > 0
+                    ? 'text-sky-200 bg-slate-800 hover:bg-slate-700 border-slate-600 cursor-pointer'
+                    : 'text-slate-500 bg-slate-900 border-slate-800 cursor-not-allowed'
+                }`}
+              >
+                <Undo2 className="w-4 h-4" />
+                <span>Undo Move</span>
+              </button>
+
+              <button
+                type="button"
+                data-testid="out-of-moves-retry-button"
+                onClick={resetLevel}
+                className="flex items-center gap-1.5 px-5 py-2.5 rounded-xl text-xs font-bold text-slate-950 bg-sky-400 hover:bg-sky-300 transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <RotateCcw className="w-4 h-4" />
+                <span>Retry Level</span>
+              </button>
             </div>
           </div>
         </div>
@@ -614,6 +885,27 @@ export default function App() {
               <Award className="w-5 h-5 sm:w-6 sm:h-6 text-emerald-400" />
             </div>
 
+            {/* 3-Star Performance Rating */}
+            <div
+              data-testid="level-complete-stars"
+              className="flex items-center justify-center gap-2 mb-2"
+              aria-label={`Earned ${earnedStars} out of 3 stars`}
+            >
+              {[1, 2, 3].map((starIdx) => {
+                const filled = starIdx <= earnedStars;
+                return (
+                  <Star
+                    key={starIdx}
+                    className={`w-7 h-7 sm:w-8 sm:h-8 transition-transform ${
+                      filled
+                        ? 'fill-amber-400 text-amber-400 drop-shadow-[0_0_10px_rgba(251,191,36,0.45)] scale-105'
+                        : 'text-slate-700'
+                    }`}
+                  />
+                );
+              })}
+            </div>
+
             <div className="text-[10px] sm:text-[11px] font-mono-tabular font-semibold uppercase tracking-widest text-emerald-400 mb-1">
               Right to Light Certified
             </div>
@@ -623,40 +915,58 @@ export default function App() {
             >
               Level {activeLevel.number} Cleared
             </h2>
-            <p className="mt-1 text-xs sm:text-sm text-slate-300">
-              {activeLevel.title} — All modular skyscraper units have been oriented and stacked onto the highlighted foundation slots without shading a single neighbor balcony!
-            </p>
+            <p className="mt-1 text-xs sm:text-sm text-slate-300">{levelClearedSubtitle}</p>
 
             {/* Right to Light Summary Metrics */}
             <div className="mt-4 sm:mt-5 grid grid-cols-3 gap-2 p-2.5 sm:p-3 rounded-xl bg-[#090d16] border border-slate-800 font-mono-tabular">
               <div>
-                <div className="text-[10px] sm:text-[11px] text-slate-400">Units Stacked</div>
+                <div className="text-[10px] sm:text-[11px] text-slate-400">Units / Cap</div>
                 <div className="text-xs sm:text-sm font-bold text-emerald-400">
-                  {winStatus.placedPiecesCount}/{winStatus.totalPieces}
+                  {winStatus.placedPiecesCount}/{winStatus.totalPieces} · {maxHeight}F
                 </div>
               </div>
               <div className="border-x border-slate-800">
-                <div className="text-[10px] sm:text-[11px] text-slate-400">Balconies Lit</div>
+                <div className="text-[10px] sm:text-[11px] text-slate-400">Balconies</div>
                 <div className="text-xs sm:text-sm font-bold text-amber-300">
-                  {sunlitWindows}/{windowCoordinates.length} Happy
+                  {winStatus.happyBalconiesCount}/{windowCoordinates.length} Happy
                 </div>
               </div>
               <div>
-                <div className="text-[10px] sm:text-[11px] text-slate-400">Crane Moves</div>
-                <div className="text-xs sm:text-sm font-bold text-sky-400">{movesCount}</div>
+                <div className="text-[10px] sm:text-[11px] text-slate-400">Moves / Par</div>
+                <div className="text-xs sm:text-sm font-bold text-sky-400">
+                  {movesCount} / {parMoves}
+                </div>
               </div>
             </div>
 
+            {activeLevelRecord && (
+              <div className="mt-2.5 font-mono-tabular text-[11px] text-slate-400">
+                Best: {activeLevelRecord.bestStars}★ · {activeLevelRecord.bestMoves} Moves
+                {earnedStars < 3 ? ` · Beat ${parMoves} moves for 3★` : ' · Master Architect!'}
+              </div>
+            )}
+
             {/* Modal Actions */}
-            <div className="mt-4 sm:mt-6 flex items-center justify-center gap-3">
+            <div className="mt-4 sm:mt-5 flex items-center justify-center gap-2.5">
               <button
                 type="button"
                 onClick={() => setModalDismissedForView(true)}
-                className="flex items-center gap-1.5 px-3.5 sm:px-4 py-2.5 rounded-xl text-xs font-medium text-slate-300 bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors cursor-pointer whitespace-nowrap"
+                className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-medium text-slate-300 bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors cursor-pointer whitespace-nowrap"
               >
                 <Eye className="w-4 h-4" />
-                <span>Inspect Tower</span>
+                <span>Inspect</span>
               </button>
+
+              {earnedStars < 3 && (
+                <button
+                  type="button"
+                  onClick={resetLevel}
+                  className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-semibold text-amber-200 bg-slate-800 hover:bg-slate-700 border border-amber-400/40 transition-colors cursor-pointer whitespace-nowrap"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                  <span>Replay</span>
+                </button>
+              )}
 
               <button
                 type="button"
@@ -682,6 +992,11 @@ export default function App() {
           windowCoordinates={windowCoordinates}
           allowedFloorSet={allowedFloorSet}
           blockedWindowSet={winStatus.blockedWindowSet}
+          angryBalconySet={winStatus.angryBalconySet}
+          vipBalconySet={winStatus.vipBalconySet}
+          shadeSeekerSet={winStatus.shadeSeekerSet}
+          maxHeight={maxHeight}
+          showSunRays={showSunRays}
           wallStencils={winStatus.wallStencils}
           floorStencils={winStatus.floorStencils}
           lastCraneTransfer={lastCraneTransfer}
@@ -700,4 +1015,5 @@ export default function App() {
     </div>
   );
 }
+
 

@@ -94,6 +94,8 @@ export interface StencilElement {
   isMatched: boolean;
 }
 
+export type BalconyRole = 'regular' | 'vip' | 'shade-seeker';
+
 export interface WinCheckResult {
   isWin: boolean;
   wallMatchedCount: number;
@@ -104,10 +106,36 @@ export interface WinCheckResult {
   windowCoordinates: Array<[number, number]>;
   /** Phase 16: Set of "x-y" strings for all neighbor building windows */
   windowCoordinateSet: Set<string>;
-  /** Phase 16: List of blocked window coordinates [[x, y], ...] hit by projected shadow */
+  /** Phase 16: List of shaded window coordinates [[x, y], ...] hit by projected shadow */
   blockedWindows: Array<[number, number]>;
-  /** Phase 16: Set of "x-y" strings for currently blocked (red) windows */
+  /** Phase 16: Set of "x-y" strings for currently shaded balconies */
   blockedWindowSet: Set<string>;
+  /** Batch 1: Zoning height cap (max y+h allowed in block units) */
+  maxHeight: number;
+  /** Batch 1: Current highest block top elevation in the Central Building Zone */
+  currentMaxBlockTopY: number;
+  /** Batch 1: True when all placed blocks respect the zoning height cap */
+  isHeightValid: boolean;
+  /** Batch 1: Permit quota — max regular (non-VIP) sun-lover balconies allowed to be ditched/shaded */
+  maxAllowedShaded: number;
+  /** Batch 1: Set of "x-y" strings for Gold VIP balconies (can NEVER be shaded) */
+  vipBalconySet: Set<string>;
+  /** Batch 1: Set of "x-y" strings for Cool-Blue Shade-Seeker balconies (MUST be shaded!) */
+  shadeSeekerSet: Set<string>;
+  /** Batch 1: Gold VIP balconies currently shaded (always blocks win) */
+  shadedVipBalconies: Array<[number, number]>;
+  /** Batch 1: Regular sun-lover balconies currently shaded (must be <= maxAllowedShaded) */
+  shadedRegularBalconies: Array<[number, number]>;
+  /** Batch 1: Shade-Seeker balconies stuck in direct hot sunlight (must be shaded to win) */
+  unsatisfiedShadeSeekers: Array<[number, number]>;
+  /** Batch 1: Shade-Seeker balconies happily cooled in shadow */
+  satisfiedShadeSeekers: Array<[number, number]>;
+  /** Batch 1: Set of "x-y" strings for balconies currently angry/unsatisfied */
+  angryBalconySet: Set<string>;
+  /** Batch 1: Count of currently happy balconies (lit sun-lovers + shaded shade-seekers) */
+  happyBalconiesCount: number;
+  /** Batch 1: Count of currently angry balconies */
+  angryBalconiesCount: number;
   /** Phase 16: Number of blocks placed inside the Central Building Zone (z in -2..2) */
   placedPiecesCount: number;
   /** Phase 16: Number of blocks still sitting in the Staging Area (z >= 3) */
@@ -167,6 +195,18 @@ export interface PuzzleLevel {
   windowCoordinates: Array<[number, number]>;
   /** Limited buildable (x, z) floor coordinates inside the Central Building Zone (-3..3, -2..2). Non-listed cells are restricted courtyard gardens. */
   allowedFloorCells: Array<[number, number]>;
+  /** Batch 1: Strict zoning height cap in half-story block units (e.g., 4..6) */
+  maxHeight?: number;
+  /** Batch 1: Max regular (non-VIP) sun-lover balconies allowed to be ditched/shaded (0 = none, 1 = ditch 1 balcony permit) */
+  maxAllowedShaded?: number;
+  /** Batch 1: Gold VIP balconies that can NEVER be shaded */
+  vipBalconies?: Array<[number, number]>;
+  /** Batch 1: Cool-Blue Shade-Seeker balconies that MUST be shaded to cool down */
+  shadeSeekerBalconies?: Array<[number, number]>;
+  /** Batch 1: 3-star efficiency move target */
+  parMoves?: number;
+  /** Batch 1: Hard crane move limit */
+  maxMoves?: number;
   pieces: Omit<WallPiece, 'position'>[];
 }
 
@@ -600,13 +640,20 @@ export function isValidPiecePosition(
   movingPieceId: string,
   candidatePos: [number, number, number],
   dims: [number, number, number],
-  allowedFloorSet?: Set<string>
+  allowedFloorSet?: Set<string>,
+  maxHeight?: number
 ): boolean {
+  const isInCentralZone = candidatePos[2] + dims[2] - 1 <= GRID_Z_MAX;
+  const effectiveMaxTopY =
+    isInCentralZone && typeof maxHeight === 'number'
+      ? Math.min(GRID_Y_MAX + 1, maxHeight)
+      : GRID_Y_MAX + 1;
+
   if (
     candidatePos[0] < GRID_MIN ||
     candidatePos[0] + dims[0] - 1 > GRID_MAX ||
     candidatePos[1] < GRID_Y_MIN ||
-    candidatePos[1] + dims[1] - 1 > GRID_Y_MAX ||
+    candidatePos[1] + dims[1] > effectiveMaxTopY ||
     candidatePos[2] < GRID_Z_MIN ||
     candidatePos[2] + dims[2] - 1 > ALL_Z_MAX
   ) {
@@ -719,7 +766,8 @@ export function resolveBestPlacementAnchor(
   allowedFloorSet?: Set<string>,
   preferLeftX = false,
   preferBackZ = false,
-  avoidCurrentPosition = false
+  avoidCurrentPosition = false,
+  maxHeight?: number
 ): {
   gridPos: [number, number, number];
   settledOthers: WallPiece[];
@@ -805,7 +853,8 @@ export function resolveBestPlacementAnchor(
       targetPiece.id,
       pos,
       targetPiece.dims,
-      allowedFloorSet
+      allowedFloorSet,
+      maxHeight
     );
 
     const isCurrentPos =
@@ -959,14 +1008,32 @@ export function isBalconyShadedByBlocks(
   return false;
 }
 
+export interface WinCheckOptions {
+  maxHeight?: number;
+  maxAllowedShaded?: number;
+  vipBalconies?: Array<[number, number]>;
+  shadeSeekerBalconies?: Array<[number, number]>;
+}
+
 /**
- * Phase 16: "Right to Light" Analytical Validator & Single 40° Sun Balcony Shadow Evaluator
+ * Phase 16 + Batch 1: "Right to Light" Analytical Validator with Zoning Height Cap,
+ * Gold VIP Balconies, Cool-Blue Shade-Seeker Balconies, and Permit Quota ("Ditch a Balcony").
  */
 export function checkWinCondition(
   pieces: WallPiece[],
   windowCoordinates: Array<[number, number]> = [],
-  allowedFloorSet?: Set<string>
+  allowedFloorSet?: Set<string>,
+  options?: WinCheckOptions
 ): WinCheckResult {
+  const maxHeight = options?.maxHeight ?? GRID_Y_MAX + 1;
+  const maxAllowedShaded = options?.maxAllowedShaded ?? 0;
+  const vipBalconySet = new Set<string>(
+    (options?.vipBalconies ?? []).map(([x, y]) => `${x}-${y}`)
+  );
+  const shadeSeekerSet = new Set<string>(
+    (options?.shadeSeekerBalconies ?? []).map(([x, y]) => `${x}-${y}`)
+  );
+
   const blocks = deriveBlocksFromPieces(pieces);
   const visibleBlocks = blocks.filter((b) => b.visible === true);
 
@@ -974,6 +1041,15 @@ export function checkWinCondition(
   const centralZoneBlocks = visibleBlocks.filter(
     (b) => b.z >= GRID_Z_MIN && b.z <= GRID_Z_MAX
   );
+
+  // Compute current highest elevation (y + 1) inside the Central Building Zone
+  let currentMaxBlockTopY = 0;
+  for (const b of centralZoneBlocks) {
+    if (b.y + 1 > currentMaxBlockTopY) {
+      currentMaxBlockTopY = b.y + 1;
+    }
+  }
+  const isHeightValid = currentMaxBlockTopY <= maxHeight;
 
   // 1. 2D Projected Shadow Coordinates on the Neighboring Buildings Wall
   const wallProjectionSet = new Set<string>(
@@ -985,21 +1061,52 @@ export function checkWinCondition(
     centralZoneBlocks.map((b) => `${b.x}-${b.z}`)
   );
 
-  // 3. Intersection check: Does the 40° Sun shadow from any block hit any balcony resident?
+  // 3. Evaluate every balcony against the 40° Sun shadow according to its role (Regular / VIP / Shade-Seeker)
   const windowCoordinateSet = new Set<string>(
     windowCoordinates.map(([wx, wy]) => `${wx}-${wy}`)
   );
   const blockedWindows: Array<[number, number]> = [];
   const blockedWindowSet = new Set<string>();
+  const shadedVipBalconies: Array<[number, number]> = [];
+  const shadedRegularBalconies: Array<[number, number]> = [];
+  const unsatisfiedShadeSeekers: Array<[number, number]> = [];
+  const satisfiedShadeSeekers: Array<[number, number]> = [];
+  const angryBalconySet = new Set<string>();
 
   for (const [wx, wy] of windowCoordinates) {
     const key = `${wx}-${wy}`;
-    if (isBalconyShadedByBlocks(wx, wy, centralZoneBlocks, LIGHT_POSITION)) {
+    const isShaded = isBalconyShadedByBlocks(wx, wy, centralZoneBlocks, LIGHT_POSITION);
+    const isVip = vipBalconySet.has(key);
+    const isShadeSeeker = shadeSeekerSet.has(key);
+
+    if (isShaded) {
       blockedWindows.push([wx, wy]);
       blockedWindowSet.add(key);
       wallProjectionSet.add(key);
     }
+
+    if (isShadeSeeker) {
+      if (isShaded) {
+        satisfiedShadeSeekers.push([wx, wy]);
+      } else {
+        unsatisfiedShadeSeekers.push([wx, wy]);
+        angryBalconySet.add(key);
+      }
+    } else if (isVip) {
+      if (isShaded) {
+        shadedVipBalconies.push([wx, wy]);
+        angryBalconySet.add(key);
+      }
+    } else {
+      if (isShaded) {
+        shadedRegularBalconies.push([wx, wy]);
+        angryBalconySet.add(key);
+      }
+    }
   }
+
+  const happyBalconiesCount = windowCoordinates.length - angryBalconySet.size;
+  const angryBalconiesCount = angryBalconySet.size;
 
   // 4. Staging Area vs Central Building Zone placement check (respecting limited allowedFloorSet)
   let placedPiecesCount = 0;
@@ -1033,8 +1140,8 @@ export function checkWinCondition(
   const targetWallShape = getTargetWallShape(pieces);
   const targetFloorShape = getTargetFloorShape(pieces);
 
-  const wallCellsMatched = windowCoordinates.length - blockedWindows.length;
-  const wallSpilloverCount = blockedWindows.length;
+  const wallCellsMatched = happyBalconiesCount;
+  const wallSpilloverCount = angryBalconiesCount;
   const floorCellsMatched = placedPiecesCount;
   const floorSpilloverCount = unplacedPiecesCount;
 
@@ -1063,10 +1170,10 @@ export function checkWinCondition(
     const gx = wx + 3;
     const gy = wy;
     if (gx >= 0 && gx < 7 && gy >= 0 && gy < 7) {
-      const isBlocked = blockedWindowSet.has(`${wx}-${wy}`);
+      const isAngry = angryBalconySet.has(`${wx}-${wy}`);
       wallGrid[gy][gx].target = true;
       wallGrid[gy][gx].isWindow = true;
-      wallGrid[gy][gx].isBlockedWindow = isBlocked;
+      wallGrid[gy][gx].isBlockedWindow = isAngry;
       wallGrid[gy][gx].profile = 'rect';
     }
   }
@@ -1078,13 +1185,15 @@ export function checkWinCondition(
     const inCentral = isPieceInCentralZone(piece, allowedFloorSet);
 
     const pieceBlocks = deriveBlocksFromPieces([piece]);
-    const blocksAnyBalcony =
+    const blocksAnyProtectedBalcony =
       inCentral &&
-      windowCoordinates.some(([wx, wy]) =>
-        isBalconyShadedByBlocks(wx, wy, pieceBlocks, LIGHT_POSITION)
-      );
+      windowCoordinates.some(([wx, wy]) => {
+        const key = `${wx}-${wy}`;
+        if (shadeSeekerSet.has(key)) return false;
+        return isBalconyShadedByBlocks(wx, wy, pieceBlocks, LIGHT_POSITION);
+      });
 
-    if (inCentral && !blocksAnyBalcony) {
+    if (inCentral && !blocksAnyProtectedBalcony && cy + h <= maxHeight) {
       sunSafePiecesCount++;
     }
 
@@ -1111,11 +1220,16 @@ export function checkWinCondition(
   }
 
   const totalPieces = pieces.length;
-  const isWin = allBlocksPlaced && blockedWindowSet.size === 0;
+  const isWin =
+    allBlocksPlaced &&
+    isHeightValid &&
+    shadedVipBalconies.length === 0 &&
+    unsatisfiedShadeSeekers.length === 0 &&
+    shadedRegularBalconies.length <= maxAllowedShaded;
 
   return {
     isWin,
-    wallMatchedCount: windowCoordinates.length - blockedWindows.length,
+    wallMatchedCount: happyBalconiesCount,
     floorMatchedCount: placedPiecesCount,
     fullySolvedPieces: sunSafePiecesCount,
     totalPieces,
@@ -1123,6 +1237,19 @@ export function checkWinCondition(
     windowCoordinateSet,
     blockedWindows,
     blockedWindowSet,
+    maxHeight,
+    currentMaxBlockTopY,
+    isHeightValid,
+    maxAllowedShaded,
+    vipBalconySet,
+    shadeSeekerSet,
+    shadedVipBalconies,
+    shadedRegularBalconies,
+    unsatisfiedShadeSeekers,
+    satisfiedShadeSeekers,
+    angryBalconySet,
+    happyBalconiesCount,
+    angryBalconiesCount,
     placedPiecesCount,
     unplacedPiecesCount,
     allBlocksPlaced,
@@ -1289,6 +1416,47 @@ const EXTRA_HALF_HEIGHT_POOL: Array<{
   },
 ];
 
+interface LevelRuleProfile {
+  maxHeight: number;
+  maxAllowedShaded: number;
+  vipCount: number;
+  shadeSeekerCount: number;
+}
+
+/**
+ * Curated Batch 1 Progression Curve across all 20 levels:
+ * - Tight zoning height caps (4–6 blocks) eliminate trivial single-column chimney stacking.
+ * - Gold VIP balconies can NEVER be shaded.
+ * - Cool-Blue Shade-Seeker balconies MUST be deliberately shaded by routing a block into their 40° sunbeam.
+ * - Permit Quota ("Ditch a Balcony") levels force choosing at most 1 non-VIP balcony to sacrifice while weaving through tight pads.
+ */
+const LEVEL_BATCH1_PROFILES: LevelRuleProfile[] = [
+  // District 1: Downtown Basics (01-04)
+  { maxHeight: 4, maxAllowedShaded: 0, vipCount: 2, shadeSeekerCount: 0 }, // 01: Zoning Cap + VIP Intro
+  { maxHeight: 4, maxAllowedShaded: 0, vipCount: 2, shadeSeekerCount: 1 }, // 02: First Shade-Seeker Balcony
+  { maxHeight: 4, maxAllowedShaded: 1, vipCount: 3, shadeSeekerCount: 0 }, // 03: First Ditch-a-Balcony Permit
+  { maxHeight: 4, maxAllowedShaded: 0, vipCount: 3, shadeSeekerCount: 1 }, // 04: Low-Cap Weaving
+  // District 2: Midtown Weaving (05-10)
+  { maxHeight: 4, maxAllowedShaded: 0, vipCount: 3, shadeSeekerCount: 1 }, // 05
+  { maxHeight: 4, maxAllowedShaded: 1, vipCount: 4, shadeSeekerCount: 1 }, // 06: Shade-Seeker + Ditch Permit
+  { maxHeight: 5, maxAllowedShaded: 0, vipCount: 3, shadeSeekerCount: 1 }, // 07
+  { maxHeight: 5, maxAllowedShaded: 0, vipCount: 3, shadeSeekerCount: 2 }, // 08: Dual Shade-Seekers
+  { maxHeight: 5, maxAllowedShaded: 1, vipCount: 4, shadeSeekerCount: 1 }, // 09: Ditch Permit + VIP Gauntlet
+  { maxHeight: 5, maxAllowedShaded: 0, vipCount: 4, shadeSeekerCount: 2 }, // 10
+  // District 3: Glass Gardens & Tight Permits (11-16)
+  { maxHeight: 5, maxAllowedShaded: 0, vipCount: 4, shadeSeekerCount: 1 }, // 11
+  { maxHeight: 5, maxAllowedShaded: 1, vipCount: 4, shadeSeekerCount: 1 }, // 12: Tight Ditch Permit
+  { maxHeight: 5, maxAllowedShaded: 0, vipCount: 4, shadeSeekerCount: 2 }, // 13
+  { maxHeight: 5, maxAllowedShaded: 0, vipCount: 4, shadeSeekerCount: 1 }, // 14
+  { maxHeight: 6, maxAllowedShaded: 1, vipCount: 5, shadeSeekerCount: 2 }, // 15: Dual Shade-Seekers + Ditch Permit
+  { maxHeight: 6, maxAllowedShaded: 0, vipCount: 5, shadeSeekerCount: 1 }, // 16
+  // District 4: Skyline Architect Mastery (17-20)
+  { maxHeight: 6, maxAllowedShaded: 0, vipCount: 5, shadeSeekerCount: 2 }, // 17
+  { maxHeight: 6, maxAllowedShaded: 1, vipCount: 5, shadeSeekerCount: 1 }, // 18: Expert Ditch Permit
+  { maxHeight: 6, maxAllowedShaded: 0, vipCount: 5, shadeSeekerCount: 2 }, // 19
+  { maxHeight: 6, maxAllowedShaded: 1, vipCount: 6, shadeSeekerCount: 2 }, // 20: Grand Arcology Finale
+];
+
 function enrichLevelsWithHalfHeightBlocks(baseLevels: PuzzleLevel[]): PuzzleLevel[] {
   return baseLevels.map((lvl, idx) => {
     // Levels 01-04 get +4 extra blocks (12-16 total); Levels 05-12 get +5 extra blocks (15-17 total); Levels 13-20 get +6 to +7 extra blocks (18-21 total)
@@ -1311,9 +1479,94 @@ function enrichLevelsWithHalfHeightBlocks(baseLevels: PuzzleLevel[]): PuzzleLeve
     }));
 
     const allPieces = [...lvl.pieces, ...extraPieces];
+    const profile =
+      LEVEL_BATCH1_PROFILES[idx] ??
+      LEVEL_BATCH1_PROFILES[LEVEL_BATCH1_PROFILES.length - 1];
+
+    // Identify balconies that can be cleanly shaded by a valid ground-supported cell under maxHeight
+    // WITHOUT forcing collateral shadow onto unrelated balconies
+    const balconyShadeInfo = lvl.windowCoordinates.map(([wx, wy]) => {
+      let bestCollateral = Infinity;
+      let canShade = false;
+      for (const [fx, fz] of lvl.allowedFloorCells) {
+        for (let y = 0; y < profile.maxHeight; y++) {
+          const probe: BlockState[] = [
+            { id: 'probe', pieceId: 'probe', shape: 'cube', x: fx, y, z: fz, visible: true },
+          ];
+          if (!isBalconyShadedByBlocks(wx, wy, probe, LIGHT_POSITION)) continue;
+          canShade = true;
+          let collateral = 0;
+          for (const [ox, oy] of lvl.windowCoordinates) {
+            if (ox === wx && oy === wy) continue;
+            if (isBalconyShadedByBlocks(ox, oy, probe, LIGHT_POSITION)) {
+              collateral++;
+            }
+          }
+          if (collateral < bestCollateral) {
+            bestCollateral = collateral;
+          }
+        }
+      }
+      return { coord: [wx, wy] as [number, number], canShade, bestCollateral };
+    });
+
+    // Pick Cool-Blue Shade-Seeker balconies from cleanly targetable balconies (prefer 0 collateral!)
+    const targetableForShade = balconyShadeInfo
+      .filter((b) => b.canShade && b.bestCollateral <= 1)
+      .sort((a, b) => a.bestCollateral - b.bestCollateral || a.coord[1] - b.coord[1]);
+
+    const shadeSeekerBalconies: Array<[number, number]> = [];
+    const usedKeys = new Set<string>();
+    for (const candidate of targetableForShade) {
+      if (shadeSeekerBalconies.length >= profile.shadeSeekerCount) break;
+      const key = `${candidate.coord[0]}-${candidate.coord[1]}`;
+      // Spread shade-seekers across distinct columns when picking 2
+      if (
+        shadeSeekerBalconies.length > 0 &&
+        shadeSeekerBalconies.some(([sx]) => sx === candidate.coord[0]) &&
+        targetableForShade.length > profile.shadeSeekerCount
+      ) {
+        continue;
+      }
+      shadeSeekerBalconies.push(candidate.coord);
+      usedKeys.add(key);
+    }
+
+    // Pick Gold VIP balconies from remaining balconies (prefer active shadeable columns so VIP protection matters!)
+    const remainingForVip = balconyShadeInfo
+      .filter((b) => !usedKeys.has(`${b.coord[0]}-${b.coord[1]}`))
+      .sort((a, b) => Number(b.canShade) - Number(a.canShade) || b.coord[1] - a.coord[1]);
+
+    const vipBalconies: Array<[number, number]> = [];
+    for (const candidate of remainingForVip) {
+      if (vipBalconies.length >= profile.vipCount) break;
+      // Leave at least 2 regular balconies on ditch-permit levels so the player has a real choice of which balcony to ditch
+      const remainingRegularAfter =
+        lvl.windowCoordinates.length -
+        shadeSeekerBalconies.length -
+        (vipBalconies.length + 1);
+      if (profile.maxAllowedShaded > 0 && remainingRegularAfter < 2) break;
+      vipBalconies.push(candidate.coord);
+      usedKeys.add(`${candidate.coord[0]}-${candidate.coord[1]}`);
+    }
+
+    // Calibrate tight, competitive Par Moves & Hard Crane Move Budget
+    const stagingCount = allPieces.filter(
+      (p) => p.initialPosition[2] >= STAGING_Z_MIN
+    ).length;
+    const relocatedCentralCount = allPieces.length - stagingCount;
+    const parMoves =
+      stagingCount + Math.ceil(relocatedCentralCount * 0.75) + 4 + (profile.shadeSeekerCount > 0 ? 1 : 0);
+    const maxMoves = parMoves + 12;
 
     return {
       ...lvl,
+      maxHeight: profile.maxHeight,
+      maxAllowedShaded: profile.maxAllowedShaded,
+      vipBalconies,
+      shadeSeekerBalconies,
+      parMoves,
+      maxMoves,
       subtitle: `${lvl.subtitle.replace(/\b\d+\s+(?:skyscraper\s+|modular\s+|structural\s+|arcology\s+)?(?:modules|blocks|units)\b/i, `${allPieces.length} half-story modules`)}`,
       pieces: allPieces,
     };

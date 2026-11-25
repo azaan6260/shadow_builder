@@ -12,6 +12,7 @@ import {
   BLOCK_HEIGHT_SCALE,
   BLOCK_SPACING,
   BUILDING_FLOOR_BLOCK_RATIO,
+  BalconyRole,
   BlockState,
   CAMERA_PRESETS,
   CameraPresetId,
@@ -37,6 +38,7 @@ import {
 } from '../types/puzzle';
 import type { CraneTransferOp } from '../store/usePuzzleStore';
 import { soundFX } from '../utils/sound';
+import { mobileBridge } from '../utils/capacitorBridge';
 
 // Detect software WebGL once
 export const isSoftwareGl = (() => {
@@ -701,7 +703,9 @@ function TowerCrane({ craneSpring }: TowerCraneProps) {
 interface BalconyWithPersonProps {
   wx: number;
   wy: number;
-  isBlocked: boolean;
+  role: BalconyRole;
+  isShaded: boolean;
+  isAngry: boolean;
   spacing: number;
 }
 
@@ -954,16 +958,29 @@ function BalconyResidentFigure({
 }
 
 /**
- * Irregularly positioned 3D Balcony with multiple standing residents (2 or 3 people on most balconies)
- * who enjoy the sun when lit and get visibly angry when a 40° block shadow lands on them.
+ * Irregularly positioned 3D Balcony with multiple standing residents (2 or 3 people on most balconies):
+ * - Regular Sun-Lover: enjoys warm sun; gets angry when shaded.
+ * - Gold VIP Balcony: gilded brass railing & floating golden crown; must NEVER be shaded.
+ * - Cool-Blue Shade-Seeker Balcony: cyan pergola awning; overheats in direct sun and chills happily when shaded!
  */
 function BalconyWithPerson({
   wx,
   wy,
-  isBlocked,
+  role,
+  isShaded,
+  isAngry,
   spacing,
 }: BalconyWithPersonProps) {
   const [offX, offY, offZ] = useMemo(() => getBalconyOffset(wx, wy), [wx, wy]);
+  const badgeRef = useRef<THREE.Mesh>(null);
+
+  useFrame((state) => {
+    if (badgeRef.current) {
+      badgeRef.current.rotation.y = state.clock.elapsedTime * 1.4;
+      badgeRef.current.position.y =
+        0.52 + Math.sin(state.clock.elapsedTime * 2.8 + wx + wy) * 0.03;
+    }
+  });
 
   const worldX = (wx + offX) * spacing;
   const worldY =
@@ -977,6 +994,55 @@ function BalconyWithPerson({
   const slabWidth =
     (peopleCount === 3 ? 0.9 : peopleCount === 2 ? 0.82 : 0.72) * spacing;
   const slabDepth = 0.76 * spacing;
+
+  const isVip = role === 'vip';
+  const isShadeSeeker = role === 'shade-seeker';
+
+  const doorColor = isAngry
+    ? isShadeSeeker
+      ? '#ea580c'
+      : '#450a0a'
+    : isShadeSeeker
+    ? '#0e7490'
+    : isVip
+    ? '#fde047'
+    : '#fef08a';
+  const doorEmissive = isAngry
+    ? isShadeSeeker
+      ? '#f97316'
+      : '#991b1b'
+    : isShadeSeeker
+    ? '#22d3ee'
+    : isVip
+    ? '#f59e0b'
+    : '#fde047';
+  const slabColor = isAngry
+    ? isShadeSeeker
+      ? '#9a3412'
+      : '#7f1d1d'
+    : isShadeSeeker && isShaded
+    ? '#164e63'
+    : isVip
+    ? '#fef3c7'
+    : '#cbd5e1';
+  const slabEdgeColor = isAngry
+    ? isShadeSeeker
+      ? '#fb923c'
+      : '#ef4444'
+    : isShadeSeeker
+    ? '#22d3ee'
+    : isVip
+    ? '#f59e0b'
+    : '#334155';
+  const railColor = isAngry
+    ? isShadeSeeker
+      ? '#f97316'
+      : '#ef4444'
+    : isVip
+    ? '#f59e0b'
+    : isShadeSeeker
+    ? '#06b6d4'
+    : '#0f172a';
 
   const residents = useMemo(() => {
     if (peopleCount === 3) {
@@ -1053,12 +1119,52 @@ function BalconyWithPerson({
       >
         <planeGeometry args={[slabWidth * 0.78, 0.58]} />
         <meshStandardMaterial
-          color={isBlocked ? '#450a0a' : '#fef08a'}
-          emissive={isBlocked ? '#991b1b' : '#fde047'}
-          emissiveIntensity={isBlocked ? 0.45 : 0.8}
+          color={doorColor}
+          emissive={doorEmissive}
+          emissiveIntensity={isAngry ? 0.58 : 0.82}
           roughness={0.3}
         />
       </mesh>
+
+      {/* VIP Gold Crown Emblem or Cool-Blue Shade-Seeker Diamond Emblem above Balcony */}
+      {(isVip || isShadeSeeker) && (
+        <mesh
+          ref={badgeRef}
+          position={[0, 0.52, slabDepth * 0.12]}
+          castShadow={false}
+          receiveShadow={false}
+          raycast={() => null}
+        >
+          <octahedronGeometry args={[0.085, 0]} />
+          <meshStandardMaterial
+            color={isVip ? '#fbbf24' : isShaded ? '#22d3ee' : '#fb923c'}
+            emissive={isVip ? '#f59e0b' : isShaded ? '#06b6d4' : '#ea580c'}
+            emissiveIntensity={0.85}
+            metalness={0.5}
+            roughness={0.2}
+          />
+        </mesh>
+      )}
+
+      {/* Cool-Blue Shade-Seeker Top Pergola Frame Accent */}
+      {isShadeSeeker && (
+        <mesh
+          position={[0, 0.34, 0]}
+          castShadow={false}
+          receiveShadow={false}
+          raycast={() => null}
+        >
+          <boxGeometry args={[slabWidth * 0.96, 0.032, slabDepth * 0.9]} />
+          <meshStandardMaterial
+            color={isShaded ? '#06b6d4' : '#f97316'}
+            emissive={isShaded ? '#0891b2' : '#ea580c'}
+            emissiveIntensity={0.45}
+            transparent
+            opacity={0.78}
+            roughness={0.3}
+          />
+        </mesh>
+      )}
 
       {/* 2. Cantilevered Concrete Balcony Floor Slab */}
       <mesh
@@ -1069,11 +1175,11 @@ function BalconyWithPerson({
       >
         <boxGeometry args={[slabWidth, 0.07, slabDepth]} />
         <meshStandardMaterial
-          color={isBlocked ? '#7f1d1d' : '#cbd5e1'}
+          color={slabColor}
           roughness={0.8}
-          metalness={0.1}
+          metalness={isVip ? 0.25 : 0.1}
         />
-        <Edges scale={1.0} threshold={15} color={isBlocked ? '#ef4444' : '#334155'} />
+        <Edges scale={1.0} threshold={15} color={slabEdgeColor} />
       </mesh>
 
       {/* 3. Balcony Front & Side Safety Railing + Glass/Steel Guard */}
@@ -1085,11 +1191,13 @@ function BalconyWithPerson({
           receiveShadow={true}
           raycast={() => null}
         >
-          <boxGeometry args={[slabWidth, 0.035, 0.035]} />
+          <boxGeometry args={[slabWidth, 0.038, 0.038]} />
           <meshStandardMaterial
-            color={isBlocked ? '#ef4444' : '#0f172a'}
-            roughness={0.4}
-            metalness={0.7}
+            color={railColor}
+            emissive={isVip && !isAngry ? '#b45309' : '#000000'}
+            emissiveIntensity={isVip && !isAngry ? 0.35 : 0}
+            roughness={0.35}
+            metalness={0.75}
           />
         </mesh>
         {/* Side Top Handrails */}
@@ -1101,11 +1209,13 @@ function BalconyWithPerson({
             receiveShadow={true}
             raycast={() => null}
           >
-            <boxGeometry args={[0.035, 0.035, slabDepth]} />
+            <boxGeometry args={[0.038, 0.038, slabDepth]} />
             <meshStandardMaterial
-              color={isBlocked ? '#ef4444' : '#0f172a'}
-              roughness={0.4}
-              metalness={0.7}
+              color={railColor}
+              emissive={isVip && !isAngry ? '#b45309' : '#000000'}
+              emissiveIntensity={isVip && !isAngry ? 0.35 : 0}
+              roughness={0.35}
+              metalness={0.75}
             />
           </mesh>
         ))}
@@ -1119,7 +1229,11 @@ function BalconyWithPerson({
             raycast={() => null}
           >
             <boxGeometry args={[0.022, 0.24, 0.022]} />
-            <meshStandardMaterial color="#334155" roughness={0.5} metalness={0.6} />
+            <meshStandardMaterial
+              color={isVip ? '#d97706' : isShadeSeeker ? '#0284c7' : '#334155'}
+              roughness={0.45}
+              metalness={0.65}
+            />
           </mesh>
         ))}
       </group>
@@ -1134,7 +1248,7 @@ function BalconyWithPerson({
           scale={res.scale}
           shirtColor={res.shirtColor}
           phaseSeed={res.phaseSeed}
-          isBlocked={isBlocked}
+          isBlocked={isAngry}
         />
       ))}
     </group>
@@ -2601,6 +2715,12 @@ interface DualShadowStageProps {
   windowCoordinates: Array<[number, number]>;
   allowedFloorSet: Set<string>;
   blockedWindowSet: Set<string>;
+  angryBalconySet: Set<string>;
+  vipBalconySet: Set<string>;
+  shadeSeekerSet: Set<string>;
+  maxHeight: number;
+  isExceedingCapPreview: boolean;
+  showSunRays: boolean;
   wallStencils: StencilElement[];
   floorStencils: StencilElement[];
   spacing: number;
@@ -2616,6 +2736,12 @@ function DualShadowStage({
   windowCoordinates,
   allowedFloorSet,
   blockedWindowSet,
+  angryBalconySet,
+  vipBalconySet,
+  shadeSeekerSet,
+  maxHeight,
+  isExceedingCapPreview,
+  showSunRays,
   spacing,
   hasSelectedBlock,
   occupiedGroundSet,
@@ -2624,6 +2750,60 @@ function DualShadowStage({
   onHoverColumn,
   onClickFloorCell,
 }: DualShadowStageProps) {
+  const zoningCapY = FLOOR_Y + maxHeight * spacing * BLOCK_HEIGHT_SCALE;
+  const sunRayVectors = useMemo(() => {
+    if (!showSunRays) return [];
+    const sunDir = new THREE.Vector3(
+      LIGHT_POSITION[0],
+      LIGHT_POSITION[1],
+      LIGHT_POSITION[2]
+    ).normalize();
+    const upAxis = new THREE.Vector3(0, 1, 0);
+    const quat = new THREE.Quaternion().setFromUnitVectors(upAxis, sunDir);
+    const euler = new THREE.Euler().setFromQuaternion(quat);
+    const rayLength = 6.2;
+
+    return windowCoordinates.map(([wx, wy]) => {
+      const key = `${wx}-${wy}`;
+      const [offX, offY, offZ] = getBalconyOffset(wx, wy);
+      const bx = (wx + offX) * spacing;
+      const by =
+        FLOOR_Y +
+        (BALCONY_BASE_BLOCK_Y + (wy + offY) * BUILDING_FLOOR_BLOCK_RATIO) *
+          spacing;
+      const bz = BALCONY_Z + offZ * spacing;
+
+      const midX = bx + sunDir.x * (rayLength * 0.5);
+      const midY = by + sunDir.y * (rayLength * 0.5);
+      const midZ = bz + sunDir.z * (rayLength * 0.5);
+
+      const role: BalconyRole = vipBalconySet.has(key)
+        ? 'vip'
+        : shadeSeekerSet.has(key)
+        ? 'shade-seeker'
+        : 'regular';
+      const isShaded = blockedWindowSet.has(key);
+      const isAngry = angryBalconySet.has(key);
+
+      return {
+        key,
+        pos: [midX, midY, midZ] as [number, number, number],
+        rot: [euler.x, euler.y, euler.z] as [number, number, number],
+        length: rayLength,
+        role,
+        isShaded,
+        isAngry,
+      };
+    });
+  }, [
+    showSunRays,
+    windowCoordinates,
+    spacing,
+    vipBalconySet,
+    shadeSeekerSet,
+    blockedWindowSet,
+    angryBalconySet,
+  ]);
   return (
     <group>
       {/* Expansive Urban Ground Receiver Plane */}
@@ -2751,17 +2931,107 @@ function DualShadowStage({
         {/* Irregularly Arranged 3D Balconies with Multiple Standing Residents */}
         {windowCoordinates.map(([wx, wy]) => {
           const key = `${wx}-${wy}`;
-          const isBlocked = blockedWindowSet.has(key);
+          const isShaded = blockedWindowSet.has(key);
+          const isAngry = angryBalconySet.has(key);
+          const role: BalconyRole = vipBalconySet.has(key)
+            ? 'vip'
+            : shadeSeekerSet.has(key)
+            ? 'shade-seeker'
+            : 'regular';
           return (
             <BalconyWithPerson
               key={`neighbor-balcony-${key}`}
               wx={wx}
               wy={wy}
-              isBlocked={isBlocked}
+              role={role}
+              isShaded={isShaded}
+              isAngry={isAngry}
               spacing={spacing}
             />
           );
         })}
+
+        {/* Batch 1: Zoning Height Cap Architectural Laser Perimeter Plane */}
+        <group position={[0, zoningCapY, 0]}>
+          {/* Translucent Sky-Cap Boundary Rim */}
+          <mesh castShadow={false} receiveShadow={false} raycast={() => null}>
+            <boxGeometry args={[7.12 * spacing, 0.018, 5.12 * spacing]} />
+            <meshBasicMaterial
+              color={isExceedingCapPreview ? '#ef4444' : '#38bdf8'}
+              transparent
+              opacity={isExceedingCapPreview ? 0.18 : 0.06}
+              depthWrite={false}
+            />
+            <Edges
+              scale={1.0}
+              threshold={15}
+              color={isExceedingCapPreview ? '#f87171' : '#38bdf8'}
+            />
+          </mesh>
+          {/* 4 Corner Height-Limit Surveying Beacons */}
+          {[
+            [-3.56 * spacing, -2.56 * spacing],
+            [3.56 * spacing, -2.56 * spacing],
+            [-3.56 * spacing, 2.56 * spacing],
+            [3.56 * spacing, 2.56 * spacing],
+          ].map(([px, pz], idx) => (
+            <mesh
+              key={`zoning-post-${idx}`}
+              position={[px, -(zoningCapY - FLOOR_Y) * 0.5, pz]}
+              castShadow={false}
+              receiveShadow={false}
+              raycast={() => null}
+            >
+              <cylinderGeometry
+                args={[0.014, 0.014, Math.max(0.2, zoningCapY - FLOOR_Y), 6]}
+              />
+              <meshBasicMaterial
+                color={isExceedingCapPreview ? '#f87171' : '#38bdf8'}
+                transparent
+                opacity={0.32}
+                depthWrite={false}
+              />
+            </mesh>
+          ))}
+        </group>
+
+        {/* Batch 1: Toggleable 40-Degree Volumetric Sun-Ray Corridors to Every Balcony */}
+        {showSunRays &&
+          sunRayVectors.map((ray) => {
+            const rayColor = ray.isAngry
+              ? ray.role === 'shade-seeker'
+                ? '#f97316'
+                : '#ef4444'
+              : ray.role === 'shade-seeker'
+              ? '#22d3ee'
+              : ray.role === 'vip'
+              ? '#fbbf24'
+              : '#fde047';
+            const rayOpacity = ray.isAngry
+              ? 0.28
+              : ray.role === 'vip' || ray.role === 'shade-seeker'
+              ? 0.2
+              : 0.11;
+            return (
+              <mesh
+                key={`sun-ray-${ray.key}`}
+                position={ray.pos}
+                rotation={ray.rot}
+                castShadow={false}
+                receiveShadow={false}
+                raycast={() => null}
+              >
+                <cylinderGeometry args={[0.045, 0.13, ray.length, 8, 1, true]} />
+                <meshBasicMaterial
+                  color={rayColor}
+                  transparent
+                  opacity={rayOpacity}
+                  side={THREE.DoubleSide}
+                  depthWrite={false}
+                />
+              </mesh>
+            );
+          })}
 
         {/* Prominent Shadow Overlay Receiver Plane across the Full Height of the Neighboring Building Facades */}
         <mesh
@@ -3040,6 +3310,11 @@ export interface CubeClusterSceneProps {
   windowCoordinates: Array<[number, number]>;
   allowedFloorSet: Set<string>;
   blockedWindowSet: Set<string>;
+  angryBalconySet: Set<string>;
+  vipBalconySet: Set<string>;
+  shadeSeekerSet: Set<string>;
+  maxHeight: number;
+  showSunRays: boolean;
   lastCraneTransfer: CraneTransferOp | null;
   selectedPieceId: string | null;
   wallStencils: StencilElement[];
@@ -3067,6 +3342,11 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
   windowCoordinates,
   allowedFloorSet,
   blockedWindowSet,
+  angryBalconySet,
+  vipBalconySet,
+  shadeSeekerSet,
+  maxHeight,
+  showSunRays,
   lastCraneTransfer,
   selectedPieceId,
   wallStencils,
@@ -3238,6 +3518,7 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
 
           // Heavy structural landing thud & grapple release when block settles into place
           soundFX.playCraneDropThud();
+          void mobileBridge.impactHeavy();
 
           // Sync hook resting coordinates immediately on landing so subsequent rotations/moves never jump
           prevHookRef.current = {
@@ -3323,19 +3604,24 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
         allowedFloorSet,
         Boolean(rawCol[2]),
         Boolean(rawCol[3]),
-        hoveredColumn !== null
+        hoveredColumn !== null,
+        maxHeight
       );
 
     const worldCenter = getPieceWorldCenter(gridPos, selectedPiece.dims, spacing);
+    const exceedsCap =
+      gridPos[2] + selectedPiece.dims[2] - 1 <= GRID_Z_MAX &&
+      gridPos[1] + selectedPiece.dims[1] > maxHeight;
 
     return {
       gridPos,
       worldCenter,
       isValidPad,
+      exceedsCap,
       isCantilevered: isValidPad && gridPos[1] > 0,
       isHoveringNewColumn: hoveredColumn !== null,
     };
-  }, [selectedPiece, hoveredColumn, pieces, allowedFloorSet, spacing]);
+  }, [selectedPiece, hoveredColumn, pieces, allowedFloorSet, spacing, maxHeight]);
 
   // Compute projected floor shadow mesh grids for all placed blocks + pre-lock 40° ray trajectory preview
   const projectedShadowData = useMemo(() => {
@@ -3389,9 +3675,13 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
       ]).filter((b) => b.z >= GRID_Z_MIN && b.z <= GRID_Z_MAX);
 
       const shadedBalconies: Array<[number, number]> = [];
+      let shadesProtectedBalcony = false;
       for (const [wx, wy] of windowCoordinates) {
         if (isBalconyShadedByBlocks(wx, wy, pieceBlocks, LIGHT_POSITION)) {
           shadedBalconies.push([wx, wy]);
+          if (!shadeSeekerSet.has(`${wx}-${wy}`)) {
+            shadesProtectedBalcony = true;
+          }
         }
       }
 
@@ -3458,7 +3748,7 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
         topWorldY,
         rayEndY,
         shadedBalconies,
-        shadesBalcony: shadedBalconies.length > 0,
+        shadesBalcony: shadesProtectedBalcony,
         rayGeo,
       };
     };
@@ -3486,7 +3776,7 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
       activePieceShadows,
       previewShadow,
     };
-  }, [pieces, selectedPiece, candidatePlacement, windowCoordinates, spacing]);
+  }, [pieces, selectedPiece, candidatePlacement, windowCoordinates, shadeSeekerSet, spacing]);
 
   useEffect(() => {
     if (hoveredPieceId || (selectedPieceId && hoveredColumn)) {
@@ -3581,6 +3871,14 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
           windowCoordinates={windowCoordinates}
           allowedFloorSet={allowedFloorSet}
           blockedWindowSet={blockedWindowSet}
+          angryBalconySet={angryBalconySet}
+          vipBalconySet={vipBalconySet}
+          shadeSeekerSet={shadeSeekerSet}
+          maxHeight={maxHeight}
+          isExceedingCapPreview={Boolean(
+            candidatePlacement?.isHoveringNewColumn && candidatePlacement?.exceedsCap
+          )}
+          showSunRays={showSunRays}
           wallStencils={wallStencils}
           floorStencils={floorStencils}
           spacing={spacing}
@@ -3603,7 +3901,7 @@ export const CubeClusterScene: React.FC<CubeClusterSceneProps> = ({
         <group>
           {/* 1. Balcony Shadow Apron Target-Zone Mesh Grids on the Floor (z = BALCONY_GRID_Z) */}
           {GRID_COORDS.map((x) => {
-            const hasBlockedBalconyInCol = Array.from(blockedWindowSet).some(
+            const hasBlockedBalconyInCol = Array.from(angryBalconySet).some(
               (key) => Number(key.split('-')[0]) === x
             );
             return (
